@@ -117,7 +117,7 @@
 //! [`LoopDestroyed`]: event::Event::LoopDestroyed
 //! [`platform`]: platform
 
-#![deny(rust_2018_idioms)]
+//#![deny(rust_2018_idioms)]
 #![deny(intra_doc_link_resolution_failure)]
 
 #[allow(unused_imports)]

@@ -3,26 +3,41 @@ use std::{
     collections::VecDeque,
     fmt,
     io::ErrorKind,
-    rc::Rc,
+    //rc::Rc,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use mio::{Events, Poll, PollOpt, Ready, Token};
+use mio::{Events, Poll /*PollOpt, Ready,*/ /*Token*/};
 
 use mio_extras::channel::{channel, Receiver, SendError, Sender};
 
-use smithay_client_toolkit::reexports::protocols::unstable::pointer_constraints::v1::client::{
-    zwp_locked_pointer_v1::ZwpLockedPointerV1, zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
-};
-use smithay_client_toolkit::reexports::protocols::unstable::relative_pointer::v1::client::{
-    zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
-    zwp_relative_pointer_v1::ZwpRelativePointerV1,
-};
-
-use smithay_client_toolkit::pointer::{AutoPointer, AutoThemer};
-use smithay_client_toolkit::reexports::client::protocol::{
-    wl_compositor::WlCompositor, wl_shm::WlShm, wl_surface::WlSurface,
+use smithay_client_toolkit::{
+    default_environment,
+    environment::{Environment, SimpleGlobal},
+    init_default_environment,
+    output::with_output_info, //get_surface_scale_factor, shm,
+    //reexports::calloop,       //::{/*EventLoop,*/ /*LoopSignal*/},
+    //seat::keyboard::{self, map_keyboard, RepeatKind},
+    //reexports::client::protocol::{wl_surface::WlSurface as Surface, wl_pointer as pointer},
+    reexports::{
+        client::protocol::{
+            //wl_compositor::WlCompositor, wl_shm::WlShm,
+            wl_seat::WlSeat,
+            wl_surface::WlSurface,
+        },
+        protocols::unstable::{
+            pointer_constraints::v1::client::{
+                zwp_locked_pointer_v1::ZwpLockedPointerV1, zwp_pointer_constraints_v1::Lifetime,
+                zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
+            },
+            relative_pointer::v1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        },
+    },
+    seat::pointer::{AutoPointer, AutoThemer, ThemeSpec::System},
+    seat::SeatData,
+    window,
+    //WaylandSource,
 };
 
 use crate::{
@@ -44,18 +59,15 @@ use super::{
     DeviceId, WindowId,
 };
 
-use smithay_client_toolkit::{
-    output::OutputMgr,
-    reexports::client::{
-        protocol::{wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_touch},
-        ConnectError, Display, EventQueue, GlobalEvent,
-    },
-    Environment,
+use smithay_client_toolkit::reexports::client::{
+    //protocol::{wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_touch},
+    protocol::{wl_output, wl_pointer},
+    Attached,
+    ConnectError,
+    //DispatchData, //GlobalEvent,
+    Display,
+    EventQueue,
 };
-
-const KBD_TOKEN: Token = Token(0);
-const USER_TOKEN: Token = Token(1);
-const EVQ_TOKEN: Token = Token(2);
 
 #[derive(Clone)]
 pub struct EventsSink {
@@ -87,25 +99,23 @@ impl EventsSink {
 }
 
 pub struct CursorManager {
-    pointer_constraints_proxy: Arc<Mutex<Option<ZwpPointerConstraintsV1>>>,
+    constraints: Option<Attached<ZwpPointerConstraintsV1>>,
     auto_themer: Option<AutoThemer>,
     pointers: Vec<AutoPointer>,
     locked_pointers: Vec<ZwpLockedPointerV1>,
     cursor_visible: bool,
     current_cursor: CursorIcon,
-    scale_factor: u32,
 }
 
 impl CursorManager {
-    fn new(constraints: Arc<Mutex<Option<ZwpPointerConstraintsV1>>>) -> CursorManager {
+    fn new(constraints: Option<Attached<ZwpPointerConstraintsV1>>) -> CursorManager {
         CursorManager {
-            pointer_constraints_proxy: constraints,
+            constraints,
             auto_themer: None,
             pointers: Vec::new(),
             locked_pointers: Vec::new(),
             cursor_visible: true,
             current_cursor: CursorIcon::default(),
-            scale_factor: 1,
         }
     }
 
@@ -150,8 +160,7 @@ impl CursorManager {
         }
     }
 
-    pub fn update_scale_factor(&mut self, scale: u32) {
-        self.scale_factor = scale;
+    pub fn update_scale_factor(&mut self) {
         self.reload_cursor_style();
     }
 
@@ -203,7 +212,7 @@ impl CursorManager {
         for pointer in self.pointers.iter() {
             // Ignore erros, since we don't want to fail hard in case we can't find a proper cursor
             // in a given theme.
-            let _ = pointer.set_cursor_with_scale(cursor, self.scale_factor, None);
+            let _ = pointer.set_cursor/*_with_scale*/(cursor, /*self.scale_factor,*/ None);
         }
     }
 
@@ -218,20 +227,11 @@ impl CursorManager {
 
         if let Some(surface) = surface {
             for pointer in self.pointers.iter() {
-                let locked_pointer = self
-                    .pointer_constraints_proxy
-                    .try_lock()
-                    .unwrap()
-                    .as_ref()
-                    .and_then(|pointer_constraints| {
-                        super::pointer::implement_locked_pointer(
-                            surface,
-                            &**pointer,
-                            pointer_constraints,
-                        )
-                        .ok()
-                    });
-
+                let locked_pointer = self.constraints.as_ref().map(|constraints| {
+                    constraints
+                        .lock_pointer(surface, pointer, None, Lifetime::Persistent.to_raw())
+                        .detach()
+                });
                 if let Some(locked_pointer) = locked_pointer {
                     self.locked_pointers.push(locked_pointer);
                 }
@@ -241,13 +241,9 @@ impl CursorManager {
 }
 
 pub struct EventLoop<T: 'static> {
-    // Poll instance
     poll: Poll,
-    // The wayland display
     pub display: Arc<Display>,
-    // The output manager
-    pub outputs: OutputMgr,
-    // The cursor manager
+    pub env: Environment<Env>,
     cursor_manager: Arc<Mutex<CursorManager>>,
     kbd_channel: Receiver<Event<'static, ()>>,
     user_channel: Receiver<T>,
@@ -262,21 +258,28 @@ pub struct EventLoopProxy<T: 'static> {
     user_sender: Sender<T>,
 }
 
-pub struct EventLoopWindowTarget<T> {
-    // the event queue
-    pub evq: RefCell<EventQueue>,
-    // The window store
+default_environment!(Env, desktop,
+    fields = [
+        relative_pointer_manager: SimpleGlobal<ZwpRelativePointerManagerV1>,
+        pointer_constraints: SimpleGlobal<ZwpPointerConstraintsV1>
+    ],
+    singles = [
+        ZwpRelativePointerManagerV1 => relative_pointer_manager,
+        ZwpPointerConstraintsV1 => pointer_constraints
+    ]
+);
+
+pub struct EventLoopWindowTarget<T: 'static> {
+    pub queue: RefCell<EventQueue>,
+    //pub event_loop: RefCell<calloop::EventLoop<Self>>,
+    //pub event_loop: RefCell<EventLoop<()>>,
     pub store: Arc<Mutex<WindowStore>>,
-    // The cursor manager
+    pub env: Environment<Env>,
     pub cursor_manager: Arc<Mutex<CursorManager>>,
-    // The env
-    pub env: Environment,
     // A cleanup switch to prune dead windows
     pub cleanup_needed: Arc<Mutex<bool>>,
     // The wayland display
     pub display: Arc<Display>,
-    // The list of seats
-    pub seats: Arc<Mutex<Vec<(u32, wl_seat::WlSeat)>>>,
     _marker: ::std::marker::PhantomData<T>,
 }
 
@@ -302,11 +305,19 @@ impl<T: 'static> EventLoopProxy<T> {
 
 impl<T: 'static> EventLoop<T> {
     pub fn new() -> Result<EventLoop<T>, ConnectError> {
-        let (display, mut event_queue) = Display::connect_to_env()?;
+        let (env, display, queue) = init_default_environment!(
+            Env,
+            desktop,
+            fields = [
+                relative_pointer_manager: SimpleGlobal::new(),
+                pointer_constraints: SimpleGlobal::new()
+            ]
+        )?;
+        //let (display, mut event_queue) = Display::connect_to_env()?;
 
         let display = Arc::new(display);
         let store = Arc::new(Mutex::new(WindowStore::new()));
-        let seats = Arc::new(Mutex::new(Vec::new()));
+        //let seats = Arc::new(Mutex::new(Vec::new()));
 
         let poll = Poll::new().unwrap();
 
@@ -314,27 +325,15 @@ impl<T: 'static> EventLoop<T> {
 
         let sink = EventsSink::new(kbd_sender);
 
-        poll.register(&kbd_channel, KBD_TOKEN, Ready::readable(), PollOpt::level())
-            .unwrap();
+        /*poll.register(&kbd_channel, KBD_TOKEN, Ready::readable(), PollOpt::level())
+        .unwrap();*/
 
-        let pointer_constraints_proxy = Arc::new(Mutex::new(None));
+        let cursor_manager = Arc::new(Mutex::new(CursorManager::new(env.get_global())));
 
-        let mut seat_manager = SeatManager {
-            sink,
-            store: store.clone(),
-            seats: seats.clone(),
-            relative_pointer_manager_proxy: Rc::new(RefCell::new(None)),
-            pointer_constraints_proxy: pointer_constraints_proxy.clone(),
-            cursor_manager: Arc::new(Mutex::new(CursorManager::new(pointer_constraints_proxy))),
-        };
+        //let shm_cell = Rc::new(RefCell::new(None));
+        //let compositor_cell = Rc::new(RefCell::new(None));
 
-        let cursor_manager = seat_manager.cursor_manager.clone();
-        let cursor_manager_clone = cursor_manager.clone();
-
-        let shm_cell = Rc::new(RefCell::new(None));
-        let compositor_cell = Rc::new(RefCell::new(None));
-
-        let env = Environment::from_display_with_cb(
+        /*let env = Environment::from_display_with_cb(
             &display,
             &mut event_queue,
             move |event, registry| match event {
@@ -405,35 +404,93 @@ impl<T: 'static> EventLoop<T> {
         .unwrap();
 
         poll.register(&event_queue, EVQ_TOKEN, Ready::readable(), PollOpt::level())
-            .unwrap();
+            .unwrap();*/
+
+        let auto_themer = AutoThemer::init(System, env.require_global(), env.require_global());
+        cursor_manager.lock().unwrap().set_auto_themer(auto_themer);
+
+        /*struct SeatManager {
+            sink: EventsSink,
+            store: Arc<Mutex<WindowStore>>,
+            //seats: Arc<Mutex<Vec<(u32, wl_seat::WlSeat)>>>,
+            relative_pointer_manager_proxy: Rc<RefCell<Option<ZwpRelativePointerManagerV1>>>,
+            pointer_constraints_proxy: Arc<Mutex<Option<ZwpPointerConstraintsV1>>>,
+            cursor_manager: Arc<Mutex<CursorManager>>,
+        }*/
+        let relative_pointer_manager = env.get_global::<ZwpRelativePointerManagerV1>();
+        env.listen_for_seats({
+            let (store, cursor_manager) = (store.clone(), cursor_manager.clone());
+            move |seat: Attached<WlSeat>, seat_data: &SeatData, _| {
+                /*let mut seat = Seat {
+                    sink: self.sink.clone(),
+                    store: self.store.clone(),
+                    pointer: None,
+                    relative_pointer: None,
+                    keyboard: None,
+                    touch: None,
+                    //modifiers_tracker: Arc::new(Mutex::new(ModifiersState::default())),
+                    cursor_manager: self.cursor_manager.clone(),
+                };
+                seat.receive(wl_seat, seat_data); // FIXME: new
+                self.seats.lock().unwrap().push(seat);*/
+                let modifiers_tracker = Arc::new(Mutex::new(ModifiersState::default()));
+                if seat_data.has_pointer {
+                    let pointer = super::pointer::implement_pointer(
+                        &seat,
+                        sink.clone(),
+                        store.clone(),
+                        modifiers_tracker.clone(),
+                        cursor_manager.clone(),
+                    );
+
+                    cursor_manager
+                        .lock()
+                        .unwrap()
+                        .register_pointer(pointer.clone());
+
+                    if let Some(manager) = &relative_pointer_manager {
+                        super::pointer::implement_relative_pointer(
+                            sink.clone(),
+                            &pointer,
+                            &manager,
+                        );
+                    }
+                }
+                if seat_data.has_keyboard {
+                    super::keyboard::map_keyboard(&seat, sink.clone(), modifiers_tracker.clone());
+                }
+                if seat_data.has_touch {
+                    super::touch::implement_touch(&seat, sink.clone(), store.clone());
+                }
+            }
+        });
 
         let (user_sender, user_channel) = channel();
 
-        poll.register(
+        /*poll.register(
             &user_channel,
             USER_TOKEN,
             Ready::readable(),
             PollOpt::level(),
         )
-        .unwrap();
+        .unwrap();*/
 
-        let cursor_manager_clone = cursor_manager.clone();
+        //let cursor_manager_clone = cursor_manager.clone();
         Ok(EventLoop {
             poll,
             display: display.clone(),
-            outputs: env.outputs.clone(),
+            env: env.clone(),
             user_sender,
             user_channel,
             kbd_channel,
-            cursor_manager,
+            cursor_manager: cursor_manager.clone(),
             window_target: RootELW {
                 p: crate::platform_impl::EventLoopWindowTarget::Wayland(EventLoopWindowTarget {
-                    evq: RefCell::new(event_queue),
+                    queue: RefCell::new(queue),
                     store,
                     env,
-                    cursor_manager: cursor_manager_clone,
+                    cursor_manager,
                     cleanup_needed: Arc::new(Mutex::new(false)),
-                    seats,
                     display,
                     _marker: ::std::marker::PhantomData,
                 }),
@@ -464,7 +521,6 @@ impl<T: 'static> EventLoop<T> {
         self.display.flush().expect("Wayland connection lost.");
 
         let mut control_flow = ControlFlow::default();
-        let mut events = Events::with_capacity(8);
 
         callback(
             Event::NewEvents(StartCause::Init),
@@ -472,25 +528,42 @@ impl<T: 'static> EventLoop<T> {
             &mut control_flow,
         );
 
+        //let mut event_loop = calloop::EventLoop::<EventLoopWindowTarget<T>>::new().unwrap();
+
+        //let event_loop = get_target(&self.window_target).event_loop.borrow_mut();
+        /*let event_loop = calloop::EventLoop::<EventLoopWindowTarget<T>>::new().unwrap();
+
+        event_loop
+         .handle()
+         .insert_source(WaylandSource::new(queue), |e, _| {
+             e.unwrap();
+         })
+         .unwrap();*/
+
+        //event_loop.run(None, &mut get_target(&self.window_target), |_| {
+        let mut events = Events::with_capacity(8);
         loop {
             // Read events from the event queue
             {
-                let mut evq = get_target(&self.window_target).evq.borrow_mut();
+                let mut queue = get_target(&self.window_target).queue.borrow_mut();
 
-                evq.dispatch_pending()
+                queue
+                    .dispatch_pending(&mut (), |_, _, _| {})
                     .expect("failed to dispatch wayland events");
 
-                if let Some(read) = evq.prepare_read() {
+                if let Some(read) = queue.prepare_read() {
                     if let Err(e) = read.read_events() {
                         if e.kind() != ErrorKind::WouldBlock {
                             panic!("failed to read wayland events: {}", e);
                         }
                     }
 
-                    evq.dispatch_pending()
+                    queue
+                        .dispatch_pending(&mut (), |_, _, _| {})
                         .expect("failed to dispatch wayland events");
                 }
             }
+            //event_loop.dispatch(Some(Duration::new(0,0)), &mut get_target(&self.window_target));
 
             self.post_dispatch_triggers(&mut callback, &mut control_flow);
 
@@ -552,21 +625,22 @@ impl<T: 'static> EventLoop<T> {
             // If some messages are there, the event loop needs to behave as if it was instantly
             // woken up by messages arriving from the wayland socket, to avoid getting stuck.
             let instant_wakeup = {
-                let window_target = match self.window_target.p {
+                /*let window_target = match self.window_target.p {
                     crate::platform_impl::EventLoopWindowTarget::Wayland(ref wt) => wt,
                     _ => unreachable!(),
-                };
-                let dispatched = window_target
-                    .evq
+                };*/
+                let dispatched = get_target(&self.window_target) //window_target
+                    .queue
                     .borrow_mut()
-                    .dispatch_pending()
+                    .dispatch_pending(&mut (), |_, _, _| {})
                     .expect("Wayland connection lost.");
                 dispatched > 0
             };
 
             match control_flow {
-                ControlFlow::Exit => break,
+                ControlFlow::Exit => break, //event_loop.get_signal().stop(),
                 ControlFlow::Poll => {
+                    //event_loop.dispatch(Some(Duration::new(0,0)), &mut get_target(&self.window_target));
                     // non-blocking dispatch
                     self.poll
                         .poll(&mut events, Some(Duration::from_millis(0)))
@@ -581,6 +655,7 @@ impl<T: 'static> EventLoop<T> {
                 }
                 ControlFlow::Wait => {
                     if !instant_wakeup {
+                        //event_loop.dispatch(None, &mut get_target(&self.window_target));
                         self.poll.poll(&mut events, None).unwrap();
                         events.clear();
                     }
@@ -602,6 +677,7 @@ impl<T: 'static> EventLoop<T> {
                     } else {
                         Duration::from_millis(0)
                     };
+                    //event_loop.dispatch(Some(duration), &mut get_target(&self.window_target));
                     self.poll.poll(&mut events, Some(duration)).unwrap();
                     events.clear();
 
@@ -633,11 +709,11 @@ impl<T: 'static> EventLoop<T> {
     }
 
     pub fn primary_monitor(&self) -> MonitorHandle {
-        primary_monitor(&self.outputs)
+        primary_monitor(&self.env)
     }
 
     pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
-        available_monitors(&self.outputs)
+        available_monitors(&self.env)
     }
 
     pub fn window_target(&self) -> &RootELW<T> {
@@ -662,6 +738,7 @@ impl<T> EventLoop<T> {
     {
         let window_target = match self.window_target.p {
             crate::platform_impl::EventLoopWindowTarget::Wayland(ref wt) => wt,
+            #[allow(unreachable_patterns)]
             _ => unreachable!(),
         };
         window_target.store.lock().unwrap().for_each_redraw_trigger(
@@ -687,6 +764,7 @@ impl<T> EventLoop<T> {
     {
         let window_target = match self.window_target.p {
             crate::platform_impl::EventLoopWindowTarget::Wayland(ref wt) => wt,
+            #[allow(unreachable_patterns)]
             _ => unreachable!(),
         };
 
@@ -725,10 +803,7 @@ impl<T> EventLoop<T> {
 
             if let Some(scale_factor) = window.new_scale_factor {
                 // Update cursor scale factor
-                self.cursor_manager
-                    .lock()
-                    .unwrap()
-                    .update_scale_factor(scale_factor as u32);
+                self.cursor_manager.lock().unwrap().update_scale_factor();
                 let new_logical_size = {
                     let scale_factor = scale_factor as f64;
                     let mut physical_size =
@@ -753,8 +828,12 @@ impl<T> EventLoop<T> {
                 if let Some(frame) = window.frame {
                     // Update decorations state
                     match window.decorations_action {
-                        Some(DecorationsAction::Hide) => frame.set_decorate(false),
-                        Some(DecorationsAction::Show) => frame.set_decorate(true),
+                        Some(DecorationsAction::Hide) => {
+                            frame.set_decorate(window::Decorations::None)
+                        }
+                        Some(DecorationsAction::Show) => {
+                            frame.set_decorate(window::Decorations::FollowServer)
+                        }
                         None => (),
                     }
 
@@ -785,11 +864,12 @@ impl<T> EventLoop<T> {
                 });
             }
 
+            // Update grab
             if let Some(grab_cursor) = window.grab_cursor {
                 let surface = if grab_cursor {
-                    Some(window.surface)
+                    Some(window.surface) // Grab
                 } else {
-                    None
+                    None // Release
                 };
                 self.cursor_manager.lock().unwrap().grab_pointer(surface);
             }
@@ -800,71 +880,27 @@ impl<T> EventLoop<T> {
 fn get_target<T>(target: &RootELW<T>) -> &EventLoopWindowTarget<T> {
     match target.p {
         crate::platform_impl::EventLoopWindowTarget::Wayland(ref wt) => wt,
+        #[allow(unreachable_patterns)]
         _ => unreachable!(),
     }
 }
 
-/*
+/*/*
  * Wayland protocol implementations
  */
 
-struct SeatManager {
-    sink: EventsSink,
-    store: Arc<Mutex<WindowStore>>,
-    seats: Arc<Mutex<Vec<(u32, wl_seat::WlSeat)>>>,
-    relative_pointer_manager_proxy: Rc<RefCell<Option<ZwpRelativePointerManagerV1>>>,
-    pointer_constraints_proxy: Arc<Mutex<Option<ZwpPointerConstraintsV1>>>,
-    cursor_manager: Arc<Mutex<CursorManager>>,
-}
-
-impl SeatManager {
-    fn add_seat(&mut self, id: u32, version: u32, registry: wl_registry::WlRegistry) {
-        use std::cmp::min;
-
-        let mut seat_data = SeatData {
-            sink: self.sink.clone(),
-            store: self.store.clone(),
-            pointer: None,
-            relative_pointer: None,
-            relative_pointer_manager_proxy: self.relative_pointer_manager_proxy.clone(),
-            keyboard: None,
-            touch: None,
-            modifiers_tracker: Arc::new(Mutex::new(ModifiersState::default())),
-            cursor_manager: self.cursor_manager.clone(),
-        };
-        let seat = registry
-            .bind(min(version, 5), id, move |seat| {
-                seat.implement_closure(move |event, seat| seat_data.receive(event, seat), ())
-            })
-            .unwrap();
-        self.store.lock().unwrap().new_seat(&seat);
-        self.seats.lock().unwrap().push((id, seat));
-    }
-
-    fn remove_seat(&mut self, id: u32) {
-        let mut seats = self.seats.lock().unwrap();
-        if let Some(idx) = seats.iter().position(|&(i, _)| i == id) {
-            let (_, seat) = seats.swap_remove(idx);
-            if seat.as_ref().version() >= 5 {
-                seat.release();
-            }
-        }
-    }
-}
-
-struct SeatData {
+struct Seat {
     sink: EventsSink,
     store: Arc<Mutex<WindowStore>>,
     pointer: Option<wl_pointer::WlPointer>,
     relative_pointer: Option<ZwpRelativePointerV1>,
-    relative_pointer_manager_proxy: Rc<RefCell<Option<ZwpRelativePointerManagerV1>>>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     touch: Option<wl_touch::WlTouch>,
-    modifiers_tracker: Arc<Mutex<ModifiersState>>,
+    //modifiers_tracker: Arc<Mutex<ModifiersState>>,
     cursor_manager: Arc<Mutex<CursorManager>>,
 }
 
-impl SeatData {
+impl Seat {
     fn receive(&mut self, evt: wl_seat::Event, seat: wl_seat::WlSeat) {
         match evt {
             wl_seat::Event::Name { .. } => (),
@@ -908,7 +944,7 @@ impl SeatData {
                 }
                 // create keyboard if applicable
                 if capabilities.contains(wl_seat::Capability::Keyboard) && self.keyboard.is_none() {
-                    self.keyboard = Some(super::keyboard::init_keyboard(
+                    self.keyboard = Some(super::keyboard::map_keyboard(
                         &seat,
                         self.sink.clone(),
                         self.modifiers_tracker.clone(),
@@ -962,7 +998,7 @@ impl Drop for SeatData {
             }
         }
     }
-}
+}*/
 
 /*
  * Monitor stuff
@@ -1001,10 +1037,7 @@ impl VideoMode {
 }
 
 #[derive(Clone)]
-pub struct MonitorHandle {
-    pub(crate) proxy: wl_output::WlOutput,
-    pub(crate) mgr: OutputMgr,
-}
+pub struct MonitorHandle(pub(crate) wl_output::WlOutput);
 
 impl PartialEq for MonitorHandle {
     fn eq(&self, other: &Self) -> bool {
@@ -1057,18 +1090,16 @@ impl fmt::Debug for MonitorHandle {
 
 impl MonitorHandle {
     pub fn name(&self) -> Option<String> {
-        self.mgr.with_info(&self.proxy, |_, info| {
-            format!("{} ({})", info.model, info.make)
-        })
+        with_output_info(&self.0, |info| format!("{} ({})", info.model, info.make))
     }
 
     #[inline]
     pub fn native_identifier(&self) -> u32 {
-        self.mgr.with_info(&self.proxy, |id, _| id).unwrap_or(0)
+        with_output_info(&self.0, |info| info.id).unwrap_or(0)
     }
 
     pub fn size(&self) -> PhysicalSize<u32> {
-        match self.mgr.with_info(&self.proxy, |_, info| {
+        match with_output_info(&self.0, |info| {
             info.modes
                 .iter()
                 .find(|m| m.is_current)
@@ -1081,25 +1112,21 @@ impl MonitorHandle {
     }
 
     pub fn position(&self) -> PhysicalPosition<i32> {
-        self.mgr
-            .with_info(&self.proxy, |_, info| info.location)
+        with_output_info(&self.0, |info| info.location)
             .unwrap_or((0, 0))
             .into()
     }
 
     #[inline]
     pub fn scale_factor(&self) -> i32 {
-        self.mgr
-            .with_info(&self.proxy, |_, info| info.scale_factor)
-            .unwrap_or(1)
+        with_output_info(&self.0, |info| info.scale_factor).unwrap_or(1)
     }
 
     #[inline]
     pub fn video_modes(&self) -> impl Iterator<Item = RootVideoMode> {
         let monitor = self.clone();
 
-        self.mgr
-            .with_info(&self.proxy, |_, info| info.modes.clone())
+        with_output_info(&self.0, |info| info.modes.clone())
             .unwrap_or(vec![])
             .into_iter()
             .map(move |x| RootVideoMode {
@@ -1113,26 +1140,18 @@ impl MonitorHandle {
     }
 }
 
-pub fn primary_monitor(outputs: &OutputMgr) -> MonitorHandle {
-    outputs.with_all(|list| {
-        if let Some(&(_, ref proxy, _)) = list.first() {
-            MonitorHandle {
-                proxy: proxy.clone(),
-                mgr: outputs.clone(),
-            }
-        } else {
-            panic!("No monitor is available.")
-        }
-    })
+pub fn primary_monitor(env: &Environment<Env>) -> MonitorHandle {
+    MonitorHandle(
+        env.get_all_outputs()
+            .first()
+            .expect("No monitor is available.")
+            .clone(),
+    )
 }
 
-pub fn available_monitors(outputs: &OutputMgr) -> VecDeque<MonitorHandle> {
-    outputs.with_all(|list| {
-        list.iter()
-            .map(|&(_, ref proxy, _)| MonitorHandle {
-                proxy: proxy.clone(),
-                mgr: outputs.clone(),
-            })
-            .collect()
-    })
+pub fn available_monitors(env: &Environment<Env>) -> VecDeque<MonitorHandle> {
+    env.get_all_outputs()
+        .iter()
+        .map(|proxy| MonitorHandle(proxy.clone()))
+        .collect()
 }
