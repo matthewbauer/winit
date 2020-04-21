@@ -38,9 +38,9 @@ use std::{
 
 use libc::{self, setlocale, LC_CTYPE};
 
-//use mio::{unix::EventedFd, Events, Poll, PollOpt, Ready, Token};
+use mio::{unix::EventedFd, Events, Poll, PollOpt, Ready, Token};
 
-//use mio_extras::channel::{channel, Receiver, SendError, Sender};
+use mio_extras::channel::{channel, Receiver, SendError, Sender};
 
 use self::{
     dnd::{Dnd, DndState},
