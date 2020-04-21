@@ -43,7 +43,7 @@ pub struct Window {
     surface: wl_surface::WlSurface,
     frame: Arc<Mutex<SWindow<ConceptFrame>>>,
     cursor_manager: Arc<Mutex<CursorManager>>,
-    env: Environment<Env>,
+    env: Arc<Mutex<Environment<Env>>>,
     size: Arc<Mutex<(u32, u32)>>,
     kill_switch: (Arc<Mutex<bool>>, Arc<Mutex<bool>>),
     display: Arc<Display>,
@@ -238,7 +238,7 @@ impl Window {
             kill_switch: (kill_switch, event_loop.cleanup_needed.clone()),
             need_frame_refresh,
             need_refresh,
-            env: event_loop.env.clone(),
+            env: Arc::new(Mutex::new(event_loop.env.clone())),
             cursor_manager: event_loop.cursor_manager.clone(),
             fullscreen,
             cursor_grab_changed,
@@ -424,11 +424,11 @@ impl Window {
     }
 
     pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
-        available_monitors(&self.env)
+        available_monitors(&self.env.lock().unwrap())
     }
 
     pub fn primary_monitor(&self) -> MonitorHandle {
-        primary_monitor(&self.env)
+        primary_monitor(&self.env.lock().unwrap())
     }
 
     pub fn raw_window_handle(&self) -> WaylandHandle {

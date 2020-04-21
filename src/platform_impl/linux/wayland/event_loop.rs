@@ -243,7 +243,7 @@ impl CursorManager {
 pub struct EventLoop<T: 'static> {
     poll: Poll,
     pub display: Arc<Display>,
-    pub env: Environment<Env>,
+    pub env: Arc<Mutex<Environment<Env>>>,
     cursor_manager: Arc<Mutex<CursorManager>>,
     kbd_channel: Receiver<Event<'static, ()>>,
     user_channel: Receiver<T>,
@@ -419,20 +419,8 @@ impl<T: 'static> EventLoop<T> {
         }*/
         let relative_pointer_manager = env.get_global::<ZwpRelativePointerManagerV1>();
         env.listen_for_seats({
-            let (store, cursor_manager) = (store.clone(), cursor_manager.clone());
+            let (event_loop, store, cursor_manager) = (event_loop.handle(), store.clone(), cursor_manager.clone());
             move |seat: Attached<WlSeat>, seat_data: &SeatData, _| {
-                /*let mut seat = Seat {
-                    sink: self.sink.clone(),
-                    store: self.store.clone(),
-                    pointer: None,
-                    relative_pointer: None,
-                    keyboard: None,
-                    touch: None,
-                    //modifiers_tracker: Arc::new(Mutex::new(ModifiersState::default())),
-                    cursor_manager: self.cursor_manager.clone(),
-                };
-                seat.receive(wl_seat, seat_data); // FIXME: new
-                self.seats.lock().unwrap().push(seat);*/
                 let modifiers_tracker = Arc::new(Mutex::new(ModifiersState::default()));
                 if seat_data.has_pointer {
                     let pointer = super::pointer::implement_pointer(
@@ -457,7 +445,8 @@ impl<T: 'static> EventLoop<T> {
                     }
                 }
                 if seat_data.has_keyboard {
-                    super::keyboard::map_keyboard(&seat, sink.clone(), modifiers_tracker.clone());
+                    let (_, source) = super::keyboard::map_keyboard(&seat, sink.clone(), modifiers_tracker.clone());
+                     event_loop.insert_source(repeat_source, |_, _| {}).unwrap();
                 }
                 if seat_data.has_touch {
                     super::touch::implement_touch(&seat, sink.clone(), store.clone());
@@ -479,7 +468,7 @@ impl<T: 'static> EventLoop<T> {
         Ok(EventLoop {
             poll,
             display: display.clone(),
-            env: env.clone(),
+            env: Arc::new(Mutex::new(env.clone())),
             user_sender,
             user_channel,
             kbd_channel,
@@ -709,11 +698,11 @@ impl<T: 'static> EventLoop<T> {
     }
 
     pub fn primary_monitor(&self) -> MonitorHandle {
-        primary_monitor(&self.env)
+        primary_monitor(&self.env.lock().unwrap())
     }
 
     pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
-        available_monitors(&self.env)
+        available_monitors(&self.env.lock().unwrap())
     }
 
     pub fn window_target(&self) -> &RootELW<T> {

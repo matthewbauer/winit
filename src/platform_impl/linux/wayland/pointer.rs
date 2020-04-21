@@ -138,11 +138,11 @@ pub fn implement_pointer(
                         wl_pointer::ButtonState::Released => ElementState::Released,
                         _ => unreachable!(),
                     };
+                    // input-event-codes
                     let button = match button {
                         0x110 => MouseButton::Left,
                         0x111 => MouseButton::Right,
                         0x112 => MouseButton::Middle,
-                        // TODO figure out the translation ?
                         _ => return,
                     };
                     sink.send_window_event(
