@@ -6,7 +6,7 @@ pub use self::{
     window::Window,
 };
 
-use smithay_client_toolkit::reexports::client::protocol::wl_surface;
+trait Sink<T> = FnMut(crate::event::Event<T>, &crate::event_loop::EventLoopWindowTarget<T>, &mut crate::event_loop::ControlFlow)+'static;
 
 mod event_loop;
 mod keyboard;
@@ -25,15 +25,10 @@ impl DeviceId {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WindowId(usize);
+pub struct WindowId(u32);
 
 impl WindowId {
     pub unsafe fn dummy() -> Self {
         WindowId(0)
     }
-}
-
-#[inline]
-fn make_wid(s: &wl_surface::WlSurface) -> WindowId {
-    WindowId(s.as_ref().c_ptr() as usize)
 }

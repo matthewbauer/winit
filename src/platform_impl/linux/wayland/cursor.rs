@@ -25,13 +25,13 @@ pub struct CursorManager {
     pointers: Vec<ThemedPointer>,
     locked_pointers: Vec<ZwpLockedPointerV1>,
     cursor_visible: bool,
-    current_cursor: CursorIcon,
+    //current_cursor: CursorIcon,
 }
 
 impl CursorManager {
-    fn new<E>(env: Environment<E>, constraints: Option<Attached<ZwpPointerConstraintsV1>>) -> CursorManager {
+    pub fn new<E>(env: Environment<E>) -> CursorManager {
         CursorManager {
-            constraints,
+            constraints: env.get_global(),
             theme_manager: ThemeManager::init(System, env.require_global(), env.require_global()),
             pointers: Vec::new(),
             locked_pointers: Vec::new(),
@@ -40,12 +40,8 @@ impl CursorManager {
         }
     }
 
-    fn register_pointer(&mut self, pointer: WlPointer) {
-        let auto_themer = self
-            .auto_themer
-            .as_ref()
-            .expect("AutoThemer not initialized. Server did not advertise shm or compositor?");
-        self.pointers.push(auto_themer.theme_pointer(pointer));
+    pub fn register_pointer(&mut self, pointer: WlPointer) {
+        self.pointers.push(self.theme_manager.theme_pointer(pointer));
     }
 
     pub fn set_cursor_visible(&mut self, visible: bool) {

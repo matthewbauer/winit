@@ -1,10 +1,22 @@
-use raw_window_handle::unix::WaylandHandle;
 use std::{
     collections::VecDeque,
     mem::replace,
     sync::{Arc, Mutex, Weak},
 };
-
+use raw_window_handle::unix::WaylandHandle;
+use smithay_client_toolkit::{
+    environment::Environment,
+    reexports::client::{
+        Display,
+        protocol::wl_surface,
+    },
+    get_surface_outputs,
+    get_surface_scale_factor,
+    window::{
+        ConceptFrame, Decorations, Event as WEvent, State as WState,
+        Window as SCTKWindow,
+    },
+};
 use crate::{
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Position, Size},
     error::{ExternalError, NotSupportedError, OsError as RootOsError},
@@ -16,24 +28,9 @@ use crate::{
     },
     window::{CursorIcon, Fullscreen, WindowAttributes},
 };
-
-use smithay_client_toolkit::{
-    environment::Environment,
-    reexports::client::{
-        Display,
-        protocol::wl_surface,
-    },
-    get_surface_outputs,
-    get_surface_scale_factor,
-    window::{
-        ConceptFrame, Decorations, Event as WEvent, State as WState,
-        Window as SWindow,
-    },
-};
-
 use super::{
     event_loop::Env,
-    make_wid, EventLoopWindowTarget, MonitorHandle, WindowId,
+    EventLoopWindowTarget, MonitorHandle, WindowId,
     cursor::CursorManager,
 };
 
@@ -388,19 +385,17 @@ impl Window {
 
     #[inline]
     pub fn set_cursor_icon(&self, cursor: CursorIcon) {
-        let mut cursor_manager = self.cursor_manager.lock().unwrap();
-        cursor_manager.set_cursor_icon(cursor);
+        self.current_cursor = cursor
     }
 
     #[inline]
     pub fn set_cursor_visible(&self, visible: bool) {
-        let mut cursor_manager = self.cursor_manager.lock().unwrap();
-        cursor_manager.set_cursor_visible(visible);
+        self.cursor_visible = visible
     }
 
     #[inline]
     pub fn set_cursor_grab(&self, grab: bool) -> Result<(), ExternalError> {
-        *self.cursor_grab_changed.lock().unwrap() = Some(grab);
+        self.cursor_grab = grab;
         Ok(())
     }
 
@@ -445,11 +440,7 @@ impl Drop for Window {
     }
 }
 
-/*
- * Internal store for windows
- */
-
-struct InternalWindow {
+/*struct Window {
     surface: wl_surface::WlSurface,
     // TODO: CONVERT TO LogicalSize<u32>s
     new_size: Option<(u32, u32)>,
@@ -457,7 +448,10 @@ struct InternalWindow {
     need_refresh: Arc<Mutex<bool>>,
     fullscreen: Arc<Mutex<bool>>,
     need_frame_refresh: Arc<Mutex<bool>>,
-    cursor_grab_changed: Arc<Mutex<Option<bool>>>,
+
+    cursor_visible: bool,
+    current_cursor: CursorIcon,
+    cursor_grab: bool,
     closed: bool,
     kill_switch: Arc<Mutex<bool>>,
     frame: Weak<Mutex<SWindow<ConceptFrame>>>,
@@ -465,11 +459,9 @@ struct InternalWindow {
     new_scale_factor: Option<i32>,
     decorated: Arc<Mutex<bool>>,
     pending_decorations_action: Arc<Mutex<Option<DecorationsAction>>>,
-}
+}*/
 
-pub struct WindowStore {
-    windows: Vec<InternalWindow>,
-}
+type Windows = Vec<Window>;
 
 pub struct WindowStoreForEach<'a> {
     pub new_size: Option<(u32, u32)>,
@@ -484,23 +476,7 @@ pub struct WindowStoreForEach<'a> {
     pub decorations_action: Option<DecorationsAction>,
 }
 
-impl WindowStore {
-    pub fn new() -> WindowStore {
-        WindowStore {
-            windows: Vec::new(),
-        }
-    }
-
-    pub fn find_wid(&self, surface: &wl_surface::WlSurface) -> Option<WindowId> {
-        for window in &self.windows {
-            if surface.as_ref().equals(&window.surface.as_ref()) {
-                return Some(make_wid(surface));
-            }
-        }
-        None
-    }
-
-    pub fn cleanup(&mut self) -> Vec<WindowId> {
+    /*pub fn cleanup(&mut self) -> Vec<WindowId> {
         let mut pruned = Vec::new();
         self.windows.retain(|w| {
             if *w.kill_switch.lock().unwrap() {
@@ -513,18 +489,18 @@ impl WindowStore {
             }
         });
         pruned
-    }
+    }*/
 
-    fn scale_factor_change(&mut self, surface: &wl_surface::WlSurface, new: i32) {
+    /*fn scale_factor_change(&mut self, surface: &wl_surface::WlSurface, new: i32) {
         for window in &mut self.windows {
             if surface.as_ref().equals(&window.surface.as_ref()) {
                 window.new_scale_factor = Some(new);
                 *(window.need_refresh.lock().unwrap()) = true;
             }
         }
-    }
+    }*/
 
-    pub fn for_each<F>(&mut self, mut f: F)
+    /*pub fn for_each<F>(&mut self, mut f: F)
     where
         F: FnMut(WindowStoreForEach<'_>),
     {
@@ -555,7 +531,7 @@ impl WindowStore {
 
     pub fn for_each_redraw_trigger<F>(&mut self, mut f: F)
     where
-        F: FnMut(bool, bool, WindowId, Option<&mut SWindow<ConceptFrame>>),
+        F: FnMut(bool, bool, WindowId, Option<&mut SCTKWindow<ConceptFrame>>),
     {
         for window in &mut self.windows {
             let opt_arc = window.frame.upgrade();
@@ -568,4 +544,4 @@ impl WindowStore {
             );
         }
     }
-}
+}*/

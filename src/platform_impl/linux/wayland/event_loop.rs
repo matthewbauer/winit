@@ -28,9 +28,7 @@ use smithay_client_toolkit::{
         },
     },
     output::with_output_info,
-    seat::SeatData,
     window,
-    WaylandSource
 };
 
 use crate::{
@@ -41,14 +39,14 @@ use crate::{
     event_loop::{ControlFlow, EventLoopClosed, EventLoopWindowTarget as RootELW},
     monitor::{MonitorHandle as RootMonitorHandle, VideoMode as RootVideoMode},
     platform_impl::platform::{
-        sticky_exit_callback, DeviceId as PlatformDeviceId, MonitorHandle as PlatformMonitorHandle,
+        sticky_exit_callback/*?*/ as callback_wrapped, DeviceId as PlatformDeviceId, MonitorHandle as PlatformMonitorHandle,
         VideoMode as PlatformVideoMode, WindowId as PlatformWindowId,
     },
     window::{WindowId as RootWindowId},
 };
 
 use super::{
-    window::{DecorationsAction, WindowStore},
+    window::{DecorationsAction},
     DeviceId, WindowId,
     cursor::CursorManager,
 };
@@ -83,12 +81,10 @@ impl EventsSink {
 }
 
 pub struct EventLoop<T: 'static> {
-    pub display: Arc<Display>,
+    user_channel: calloop::channel::Channel<T>,
+    pub event_loop: calloop::EventLoop<DispatchData<T>>,
     pub env: Arc<Mutex<Environment<Env>>>,
     cursor_manager: Arc<Mutex<CursorManager>>,
-    kbd_channel: Receiver<Event<'static, ()>>,
-    user_channel: Receiver<T>,
-    user_sender: Sender<T>,
     window_target: RootELW<T>,
 }
 
@@ -111,17 +107,16 @@ default_environment!(Env, desktop,
 );
 
 pub struct EventLoopWindowTarget<T: 'static> {
-    pub queue: RefCell<EventQueue>,
-    pub event_loop: RefCell<calloop::EventLoop<Self>>,
-    pub store: Arc<Mutex<WindowStore>>,
     pub env: Environment<Env>,
     pub cursor_manager: Arc<Mutex<CursorManager>>,
+    pub modifiers_tracker: Arc<Mutex<ModifiersState>>,
     // A cleanup switch to prune dead windows
     pub cleanup_needed: Arc<Mutex<bool>>,
     // The wayland display
     pub display: Arc<Display>,
     _marker: ::std::marker::PhantomData<T>,
 }
+type DispatchData<T> = EventLoopWindowTarget<T>;
 
 impl<T: 'static> Clone for EventLoopProxy<T> {
     fn clone(&self) -> Self {
@@ -134,7 +129,7 @@ impl<T: 'static> Clone for EventLoopProxy<T> {
 impl<T: 'static> EventLoopProxy<T> {
     pub fn send_event(&self, event: T) -> Result<(), EventLoopClosed<T>> {
         self.user_sender.send(event).map_err(|e| {
-            EventLoopClosed(if let std::sync::mpsc::SendError::Disconnected(x) = e {
+            EventLoopClosed(if let std::sync::mpsc::SendError(x) = e {
                 x
             } else {
                 unreachable!()
@@ -145,8 +140,10 @@ impl<T: 'static> EventLoopProxy<T> {
 
 impl<T: 'static> EventLoop<T> {
     pub fn new() -> Result<EventLoop<T>, ConnectError> {
-        let mut event_loop = calloop::EventLoop::<EventLoopWindowTarget<T>>::new().unwrap();
+        let mut event_loop = calloop::EventLoop::<DispatchData<T>>::new().unwrap();
 
+        use smithay_client_toolkit::{default_environment, init_default_environment, WaylandSource, seat};
+        default_environment!(Env, desktop);
         let (env, display, queue) = init_default_environment!(
             Env,
             desktop,
@@ -155,75 +152,98 @@ impl<T: 'static> EventLoop<T> {
                 pointer_constraints: SimpleGlobal::new()
             ]
         )?;
-        event_loop
-         .handle()
-         .insert_source(WaylandSource::new(queue), |e, _| {
-             e.unwrap();
-         })
-         .unwrap();
+        WaylandSource::new(queue)
+            .quick_insert(event_loop.handle())
+            .unwrap();
 
-        let display = Arc::new(display);
-        let store = Arc::new(Mutex::new(WindowStore::new()));
-
-        let (kbd_sender, kbd_channel) = unbounded();
-
-        let sink = EventsSink::new(kbd_sender);
 
         let cursor_manager = Arc::new(Mutex::new(CursorManager::new(env)));
 
-        let relative_pointer_manager = env.get_global::<ZwpRelativePointerManagerV1>();
-        env.listen_for_seats({
-            let (event_loop, store, cursor_manager) = (event_loop.handle(), store.clone(), cursor_manager.clone());
-            move |seat: Attached<WlSeat>, seat_data: &SeatData, _| {
-                let modifiers_tracker = Arc::new(Mutex::new(ModifiersState::default()));
+        /// Mutable state time shared by stream handlers on main thread
+        struct State {
+            keyboard: super::keyboard::Keyboard,
+            pointers: Vec<super::pointer::Pointer>,
+
+            window: Window<ConceptFrame>,
+            current_cursor: &'static str,
+            scale_factor: u32,
+            size: (u32, u32),
+            resized: bool,
+            need_refresh: bool,
+        }
+        //
+        struct DispatchData<'t, St:Stream+Unpin> {
+            frame: &'t mut Frame<'t, St>,
+            state: &'t mut State,
+        }
+
+        let seat_handler = { // for a simple setup
+            use seat::{
+                pointer::{ThemeManager, ThemeSpec},
+                keyboard::{map_keyboard, RepeatKind},
+            };
+
+            let theme_manager = ThemeManager::init(
+                ThemeSpec::System,
+                env.require_global(),
+                env.require_global(),
+            );
+
+            let relative_pointer_manager = env.get_global::<ZwpRelativePointerManagerV1>();
+
+            env.listen_for_seats(move |seat, seat_data, mut data| {
+                let DispatchData{state:State{pointer, .. }} = data.get().unwrap();
                 if seat_data.has_pointer {
-                    let pointer = super::pointer::implement_pointer(
-                        &seat,
-                        sink.clone(),
-                        store.clone(),
-                        modifiers_tracker.clone(),
-                        cursor_manager.clone(),
-                    );
+                    pointers.push(theme_manager.theme_pointer_with_impl(&seat,
+                        {
+                            let pointer = super::pointer::Pointer::default(); // Track focus and reconstruct scroll events
+                            move/*pointer*/ |event, themed_pointer, data| {
+                                let DispatchData{frame, state:State{ window, current_cursor, .. }} = data.get().unwrap();
+                                pointer.handle(event, themed_pointer, frame, window, current_cursor);
+                            }
+                        }
+                    ).unwrap());
 
-                    cursor_manager
-                        .lock()
-                        .unwrap()
-                        .register_pointer(pointer.clone());
-
-                    if let Some(manager) = &relative_pointer_manager {
-                        super::pointer::implement_relative_pointer(
-                            sink.clone(),
-                            &pointer,
-                            &manager,
-                        );
+                    if Some(manager) = relative_pointer_manager {
+                        manager.get_relative_pointer(pointer).quick_assign(move |_, event, data| match event {
+                            Event::RelativeMotion { dx, dy, .. } => {
+                                data.get().unwrap().sink.send_device_event(DeviceEvent::MouseMotion { delta: (dx, dy) }, DeviceId)
+                            }
+                            _ => unreachable!(),
+                        });
                     }
                 }
                 if seat_data.has_keyboard {
-                    let (_, repeat_source) = super::keyboard::map_keyboard(&seat, sink.clone(), modifiers_tracker.clone());
-                     event_loop.insert_source(repeat_source, |_, _| {}).unwrap();
+                    let _ = map_keyboard(&seat, None, RepeatKind::System,
+                        |event, _, data| {
+                            let DispatchData{frame, state} = data.get().unwrap();
+                            state.keyboard.handle(event, frame);
+                        }
+                    ).unwrap();
                 }
+
                 if seat_data.has_touch {
-                    super::touch::implement_touch(&seat, sink.clone(), store.clone());
+                    seat.get_touch().quick_assign({
+                        let touch = super::touch::Touch::default(); // Track touch points
+                        |_, event, data| {
+                            let DispatchData{frame:Frame{sink}, ..} = data.get().unwrap();
+                            state.touch.handle(event, sink);
+                        }
+                    }).unwrap();
                 }
-            }
-        });
+            });
+        };
 
-        let (user_sender, user_channel) = unbounded();
-
+        let display = Arc::new(display);
         Ok(EventLoop {
-            event_loop,
+            channel: unbounded(),
             display: display.clone(),
             env: Arc::new(Mutex::new(env.clone())),
-            user_sender,
-            user_channel,
-            kbd_channel,
-            cursor_manager: cursor_manager.clone(),
+            cursor_manager: cursor_manager.clone(), // grab
             window_target: RootELW {
-                p: crate::platform_impl::EventLoopWindowTarget::Wayland(EventLoopWindowTarget {
-                    queue: RefCell::new(queue),
+                p: crate::platform_impl::EventLoopWindowTarget::Wayland(DispatchData {
                     store,
                     env,
-                    cursor_manager,
                     cleanup_needed: Arc::new(Mutex::new(false)),
                     display,
                     _marker: ::std::marker::PhantomData,
@@ -265,40 +285,6 @@ impl<T: 'static> EventLoop<T> {
         loop {
             self.event_loop.dispatch_pending(&mut get_target(&self.window_target), |_, _, _| {}).expect("Wayland connection lost.");
 
-            // send Events cleared
-            {
-                sticky_exit_callback(
-                    Event::MainEventsCleared,
-                    &self.window_target,
-                    &mut control_flow,
-                    &mut callback,
-                );
-            }
-
-            // handle request-redraw
-            {
-                self.redraw_triggers(|wid, window_target| {
-                    sticky_exit_callback(
-                        Event::RedrawRequested(crate::window::WindowId(
-                            crate::platform_impl::WindowId::Wayland(wid),
-                        )),
-                        window_target,
-                        &mut control_flow,
-                        &mut callback,
-                    );
-                });
-            }
-
-            // send RedrawEventsCleared
-            {
-                sticky_exit_callback(
-                    Event::RedrawEventsCleared,
-                    &self.window_target,
-                    &mut control_flow,
-                    &mut callback,
-                );
-            }
-
             // send pending events to the server
             self.display.flush().expect("Wayland connection lost.");
 
@@ -309,22 +295,50 @@ impl<T: 'static> EventLoop<T> {
             // If some messages are there, the event loop needs to behave as if it was instantly
             // woken up by messages arriving from the wayland socket, to avoid getting stuck.
             let instant_wakeup = {
-                /*let window_target = match self.window_target.p {
-                    crate::platform_impl::EventLoopWindowTarget::Wayland(ref wt) => wt,
-                    _ => unreachable!(),
-                };*/
-                let dispatched = get_target(&self.window_target) //window_target
-                    .queue
-                    .borrow_mut()
-                    .dispatch_pending(&mut (), |_, _, _| {})
-                    .expect("Wayland connection lost.");
-                dispatched > 0
+                 /*let window_target = match self.window_target.p {
+                     crate::platform_impl::EventLoopWindowTarget::Wayland(ref wt) => wt,
+                     _ => unreachable!(),
+                 };*/
+                 let dispatched = get_target(&self.window_target) //window_target
+                     .queue
+                     .borrow_mut()
+                     .dispatch_pending(&mut (), |_, _, _| {})
+                     .expect("Wayland connection lost.");
+                 dispatched > 0
             };
+
+            // send Events cleared
+            callback_wrapped(
+                    Event::MainEventsCleared,
+                    &self.window_target,
+                    &mut control_flow,
+                    &mut callback,
+                );
+
+            // handle request-redraw
+            self.redraw_triggers(|wid, window_target| {
+                    callback_wrapped(
+                        Event::RedrawRequested(crate::window::WindowId(
+                            crate::platform_impl::WindowId::Wayland(wid),
+                        )),
+                        window_target,
+                        &mut control_flow,
+                        &mut callback,
+                    );
+                });
+
+            // send RedrawEventsCleared
+            callback_wrapped(
+                    Event::RedrawEventsCleared,
+                    &self.window_target,
+                    &mut control_flow,
+                    &mut callback,
+                );
 
             match control_flow {
                 ControlFlow::Exit => self.event_loop.get_signal().stop(),
                 ControlFlow::Poll => {
-                    self.event_loop.dispatch(Some(Duration::new(0,0)), &mut get_target(&self.window_target));
+                    self.event_loop.dispatch_pending(Some(Duration::new(0,0)), &mut get_target(&self.window_target));
 
                     callback(
                         Event::NewEvents(StartCause::Poll),
@@ -412,7 +426,7 @@ impl<T> EventLoop<T> {
         F: FnMut(WindowId, &RootELW<T>),
     {
         let window_target = match self.window_target.p {
-            crate::platform_impl::EventLoopWindowTarget::Wayland(ref wt) => wt,
+            crate::platform_impl::EventLoopWindowTarget::Wayland(ref data) => data,
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
         };
@@ -444,7 +458,7 @@ impl<T> EventLoop<T> {
         };
 
         let mut callback = |event: Event<'_, T>| {
-            sticky_exit_callback(event, &self.window_target, control_flow, &mut callback);
+            callback_wrapped(event, &self.window_target, control_flow, &mut callback);
         };
 
         // prune possible dead windows
@@ -478,7 +492,6 @@ impl<T> EventLoop<T> {
 
             if let Some(scale_factor) = window.new_scale_factor {
                 // Update cursor scale factor
-                self.cursor_manager.lock().unwrap().update_scale_factor();
                 let new_logical_size = {
                     let scale_factor = scale_factor as f64;
                     let mut physical_size =
@@ -559,122 +572,6 @@ fn get_target<T>(target: &RootELW<T>) -> &EventLoopWindowTarget<T> {
         _ => unreachable!(),
     }
 }
-
-/*/*
- * Wayland protocol implementations
- */
-
-struct Seat {
-    sink: EventsSink,
-    store: Arc<Mutex<WindowStore>>,
-    pointer: Option<wl_pointer::WlPointer>,
-    relative_pointer: Option<ZwpRelativePointerV1>,
-    keyboard: Option<wl_keyboard::WlKeyboard>,
-    touch: Option<wl_touch::WlTouch>,
-    //modifiers_tracker: Arc<Mutex<ModifiersState>>,
-    cursor_manager: Arc<Mutex<CursorManager>>,
-}
-
-impl Seat {
-    fn receive(&mut self, evt: wl_seat::Event, seat: wl_seat::WlSeat) {
-        match evt {
-            wl_seat::Event::Name { .. } => (),
-            wl_seat::Event::Capabilities { capabilities } => {
-                // create pointer if applicable
-                if capabilities.contains(wl_seat::Capability::Pointer) && self.pointer.is_none() {
-                    self.pointer = Some(super::pointer::implement_pointer(
-                        &seat,
-                        self.sink.clone(),
-                        self.store.clone(),
-                        self.modifiers_tracker.clone(),
-                        self.cursor_manager.clone(),
-                    ));
-
-                    self.cursor_manager
-                        .lock()
-                        .unwrap()
-                        .register_pointer(self.pointer.as_ref().unwrap().clone());
-
-                    self.relative_pointer = self
-                        .relative_pointer_manager_proxy
-                        .try_borrow()
-                        .unwrap()
-                        .as_ref()
-                        .and_then(|manager| {
-                            super::pointer::implement_relative_pointer(
-                                self.sink.clone(),
-                                self.pointer.as_ref().unwrap(),
-                                manager,
-                            )
-                            .ok()
-                        })
-                }
-                // destroy pointer if applicable
-                if !capabilities.contains(wl_seat::Capability::Pointer) {
-                    if let Some(pointer) = self.pointer.take() {
-                        if pointer.as_ref().version() >= 3 {
-                            pointer.release();
-                        }
-                    }
-                }
-                // create keyboard if applicable
-                if capabilities.contains(wl_seat::Capability::Keyboard) && self.keyboard.is_none() {
-                    self.keyboard = Some(super::keyboard::map_keyboard(
-                        &seat,
-                        self.sink.clone(),
-                        self.modifiers_tracker.clone(),
-                    ))
-                }
-                // destroy keyboard if applicable
-                if !capabilities.contains(wl_seat::Capability::Keyboard) {
-                    if let Some(kbd) = self.keyboard.take() {
-                        if kbd.as_ref().version() >= 3 {
-                            kbd.release();
-                        }
-                    }
-                }
-                // create touch if applicable
-                if capabilities.contains(wl_seat::Capability::Touch) && self.touch.is_none() {
-                    self.touch = Some(super::touch::implement_touch(
-                        &seat,
-                        self.sink.clone(),
-                        self.store.clone(),
-                    ))
-                }
-                // destroy touch if applicable
-                if !capabilities.contains(wl_seat::Capability::Touch) {
-                    if let Some(touch) = self.touch.take() {
-                        if touch.as_ref().version() >= 3 {
-                            touch.release();
-                        }
-                    }
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
-}
-
-impl Drop for SeatData {
-    fn drop(&mut self) {
-        if let Some(pointer) = self.pointer.take() {
-            if pointer.as_ref().version() >= 3 {
-                pointer.release();
-            }
-        }
-        if let Some(kbd) = self.keyboard.take() {
-            if kbd.as_ref().version() >= 3 {
-                kbd.release();
-            }
-        }
-        if let Some(touch) = self.touch.take() {
-            if touch.as_ref().version() >= 3 {
-                touch.release();
-            }
-        }
-    }
-}*/
-
 /*
  * Monitor stuff
  */
