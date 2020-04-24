@@ -80,7 +80,7 @@ impl Window {
                 });
 
         // Always 1.
-        let scale_factor = 1; //get_dpi_factor(&surface);
+        let scale_factor = get_dpi_factor(&surface);
 
         let (width, height) = attributes
             .inner_size
