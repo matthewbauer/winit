@@ -7,10 +7,11 @@ use crate::event::{
 };
 
 use super::{
-    event_loop::{CursorManager, EventsSink},
     make_wid,
     window::WindowStore,
     DeviceId,
+    event_loop::EventsSink,
+    cursor::CursorManager
 };
 
 use smithay_client_toolkit::{

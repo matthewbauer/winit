@@ -13,6 +13,7 @@ mod keyboard;
 mod pointer;
 mod touch;
 mod window;
+mod cursor;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DeviceId;

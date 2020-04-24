@@ -2,42 +2,35 @@ use std::{
     cell::RefCell,
     collections::VecDeque,
     fmt,
-    io::ErrorKind,
-    //rc::Rc,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use mio::{Events, Poll /*PollOpt, Ready,*/ /*Token*/};
-
-use mio_extras::channel::{channel, Receiver, SendError, Sender};
-
 use smithay_client_toolkit::{
+    reexports::calloop::{self, channel::{channel as unbounded, Sender, Channel as Receiver}},
     default_environment,
     environment::{Environment, SimpleGlobal},
     init_default_environment,
-    output::with_output_info, //get_surface_scale_factor, shm,
-    //reexports::calloop,       //::{/*EventLoop,*/ /*LoopSignal*/},
-    //seat::keyboard::{self, map_keyboard, RepeatKind},
-    //reexports::client::protocol::{wl_surface::WlSurface as Surface, wl_pointer as pointer},
     reexports::{
-        client::protocol::{
-            //wl_compositor::WlCompositor, wl_shm::WlShm,
-            wl_seat::WlSeat,
-            wl_surface::WlSurface,
+        client::{
+            ConnectError, Display,
+            EventQueue, Attached,
+            protocol::{
+                wl_output,
+                wl_seat::WlSeat,
+            },
         },
         protocols::unstable::{
             pointer_constraints::v1::client::{
-                zwp_locked_pointer_v1::ZwpLockedPointerV1, zwp_pointer_constraints_v1::Lifetime,
                 zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
             },
             relative_pointer::v1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
         },
     },
-    seat::pointer::{AutoPointer, AutoThemer, ThemeSpec::System},
+    output::with_output_info,
     seat::SeatData,
     window,
-    //WaylandSource,
+    WaylandSource
 };
 
 use crate::{
@@ -51,22 +44,13 @@ use crate::{
         sticky_exit_callback, DeviceId as PlatformDeviceId, MonitorHandle as PlatformMonitorHandle,
         VideoMode as PlatformVideoMode, WindowId as PlatformWindowId,
     },
-    window::{CursorIcon, WindowId as RootWindowId},
+    window::{WindowId as RootWindowId},
 };
 
 use super::{
     window::{DecorationsAction, WindowStore},
     DeviceId, WindowId,
-};
-
-use smithay_client_toolkit::reexports::client::{
-    //protocol::{wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_touch},
-    protocol::{wl_output, wl_pointer},
-    Attached,
-    ConnectError,
-    //DispatchData, //GlobalEvent,
-    Display,
-    EventQueue,
+    cursor::CursorManager,
 };
 
 #[derive(Clone)]
@@ -98,150 +82,7 @@ impl EventsSink {
     }
 }
 
-pub struct CursorManager {
-    constraints: Option<Attached<ZwpPointerConstraintsV1>>,
-    auto_themer: Option<AutoThemer>,
-    pointers: Vec<AutoPointer>,
-    locked_pointers: Vec<ZwpLockedPointerV1>,
-    cursor_visible: bool,
-    current_cursor: CursorIcon,
-}
-
-impl CursorManager {
-    fn new(constraints: Option<Attached<ZwpPointerConstraintsV1>>) -> CursorManager {
-        CursorManager {
-            constraints,
-            auto_themer: None,
-            pointers: Vec::new(),
-            locked_pointers: Vec::new(),
-            cursor_visible: true,
-            current_cursor: CursorIcon::default(),
-        }
-    }
-
-    fn register_pointer(&mut self, pointer: wl_pointer::WlPointer) {
-        let auto_themer = self
-            .auto_themer
-            .as_ref()
-            .expect("AutoThemer not initialized. Server did not advertise shm or compositor?");
-        self.pointers.push(auto_themer.theme_pointer(pointer));
-    }
-
-    fn set_auto_themer(&mut self, auto_themer: AutoThemer) {
-        self.auto_themer = Some(auto_themer);
-    }
-
-    pub fn set_cursor_visible(&mut self, visible: bool) {
-        if !visible {
-            for pointer in self.pointers.iter() {
-                (**pointer).set_cursor(0, None, 0, 0);
-            }
-        } else {
-            self.set_cursor_icon_impl(self.current_cursor);
-        }
-        self.cursor_visible = visible;
-    }
-
-    /// A helper function to restore cursor styles on PtrEvent::Enter.
-    pub fn reload_cursor_style(&mut self) {
-        if !self.cursor_visible {
-            self.set_cursor_visible(false);
-        } else {
-            self.set_cursor_icon_impl(self.current_cursor);
-        }
-    }
-
-    pub fn set_cursor_icon(&mut self, cursor: CursorIcon) {
-        if cursor != self.current_cursor {
-            self.current_cursor = cursor;
-            if self.cursor_visible {
-                self.set_cursor_icon_impl(cursor);
-            }
-        }
-    }
-
-    pub fn update_scale_factor(&mut self) {
-        self.reload_cursor_style();
-    }
-
-    fn set_cursor_icon_impl(&mut self, cursor: CursorIcon) {
-        let cursor = match cursor {
-            CursorIcon::Alias => "link",
-            CursorIcon::Arrow => "arrow",
-            CursorIcon::Cell => "plus",
-            CursorIcon::Copy => "copy",
-            CursorIcon::Crosshair => "crosshair",
-            CursorIcon::Default => "left_ptr",
-            CursorIcon::Hand => "hand",
-            CursorIcon::Help => "question_arrow",
-            CursorIcon::Move => "move",
-            CursorIcon::Grab => "grab",
-            CursorIcon::Grabbing => "grabbing",
-            CursorIcon::Progress => "progress",
-            CursorIcon::AllScroll => "all-scroll",
-            CursorIcon::ContextMenu => "context-menu",
-
-            CursorIcon::NoDrop => "no-drop",
-            CursorIcon::NotAllowed => "crossed_circle",
-
-            // Resize cursors
-            CursorIcon::EResize => "right_side",
-            CursorIcon::NResize => "top_side",
-            CursorIcon::NeResize => "top_right_corner",
-            CursorIcon::NwResize => "top_left_corner",
-            CursorIcon::SResize => "bottom_side",
-            CursorIcon::SeResize => "bottom_right_corner",
-            CursorIcon::SwResize => "bottom_left_corner",
-            CursorIcon::WResize => "left_side",
-            CursorIcon::EwResize => "h_double_arrow",
-            CursorIcon::NsResize => "v_double_arrow",
-            CursorIcon::NwseResize => "bd_double_arrow",
-            CursorIcon::NeswResize => "fd_double_arrow",
-            CursorIcon::ColResize => "h_double_arrow",
-            CursorIcon::RowResize => "v_double_arrow",
-
-            CursorIcon::Text => "text",
-            CursorIcon::VerticalText => "vertical-text",
-
-            CursorIcon::Wait => "watch",
-
-            CursorIcon::ZoomIn => "zoom-in",
-            CursorIcon::ZoomOut => "zoom-out",
-        };
-
-        for pointer in self.pointers.iter() {
-            // Ignore erros, since we don't want to fail hard in case we can't find a proper cursor
-            // in a given theme.
-            let _ = pointer.set_cursor/*_with_scale*/(cursor, /*self.scale_factor,*/ None);
-        }
-    }
-
-    // This function can only be called from a thread on which `pointer_constraints_proxy` event
-    // queue is located, so calling it directly from a Window doesn't work well, in case
-    // you've sent your window to another thread, so we need to pass cursor grab updates to
-    // the event loop and call this function from there.
-    fn grab_pointer(&mut self, surface: Option<&WlSurface>) {
-        for locked_pointer in self.locked_pointers.drain(..) {
-            locked_pointer.destroy();
-        }
-
-        if let Some(surface) = surface {
-            for pointer in self.pointers.iter() {
-                let locked_pointer = self.constraints.as_ref().map(|constraints| {
-                    constraints
-                        .lock_pointer(surface, pointer, None, Lifetime::Persistent.to_raw())
-                        .detach()
-                });
-                if let Some(locked_pointer) = locked_pointer {
-                    self.locked_pointers.push(locked_pointer);
-                }
-            }
-        }
-    }
-}
-
 pub struct EventLoop<T: 'static> {
-    poll: Poll,
     pub display: Arc<Display>,
     pub env: Arc<Mutex<Environment<Env>>>,
     cursor_manager: Arc<Mutex<CursorManager>>,
@@ -271,8 +112,7 @@ default_environment!(Env, desktop,
 
 pub struct EventLoopWindowTarget<T: 'static> {
     pub queue: RefCell<EventQueue>,
-    //pub event_loop: RefCell<calloop::EventLoop<Self>>,
-    //pub event_loop: RefCell<EventLoop<()>>,
+    pub event_loop: RefCell<calloop::EventLoop<Self>>,
     pub store: Arc<Mutex<WindowStore>>,
     pub env: Environment<Env>,
     pub cursor_manager: Arc<Mutex<CursorManager>>,
@@ -294,7 +134,7 @@ impl<T: 'static> Clone for EventLoopProxy<T> {
 impl<T: 'static> EventLoopProxy<T> {
     pub fn send_event(&self, event: T) -> Result<(), EventLoopClosed<T>> {
         self.user_sender.send(event).map_err(|e| {
-            EventLoopClosed(if let SendError::Disconnected(x) = e {
+            EventLoopClosed(if let std::sync::mpsc::SendError::Disconnected(x) = e {
                 x
             } else {
                 unreachable!()
@@ -305,6 +145,8 @@ impl<T: 'static> EventLoopProxy<T> {
 
 impl<T: 'static> EventLoop<T> {
     pub fn new() -> Result<EventLoop<T>, ConnectError> {
+        let mut event_loop = calloop::EventLoop::<EventLoopWindowTarget<T>>::new().unwrap();
+
         let (env, display, queue) = init_default_environment!(
             Env,
             desktop,
@@ -313,110 +155,22 @@ impl<T: 'static> EventLoop<T> {
                 pointer_constraints: SimpleGlobal::new()
             ]
         )?;
-        //let (display, mut event_queue) = Display::connect_to_env()?;
+        event_loop
+         .handle()
+         .insert_source(WaylandSource::new(queue), |e, _| {
+             e.unwrap();
+         })
+         .unwrap();
 
         let display = Arc::new(display);
         let store = Arc::new(Mutex::new(WindowStore::new()));
-        //let seats = Arc::new(Mutex::new(Vec::new()));
 
-        let poll = Poll::new().unwrap();
-
-        let (kbd_sender, kbd_channel) = channel();
+        let (kbd_sender, kbd_channel) = unbounded();
 
         let sink = EventsSink::new(kbd_sender);
 
-        /*poll.register(&kbd_channel, KBD_TOKEN, Ready::readable(), PollOpt::level())
-        .unwrap();*/
+        let cursor_manager = Arc::new(Mutex::new(CursorManager::new(env)));
 
-        let cursor_manager = Arc::new(Mutex::new(CursorManager::new(env.get_global())));
-
-        //let shm_cell = Rc::new(RefCell::new(None));
-        //let compositor_cell = Rc::new(RefCell::new(None));
-
-        /*let env = Environment::from_display_with_cb(
-            &display,
-            &mut event_queue,
-            move |event, registry| match event {
-                GlobalEvent::New {
-                    id,
-                    ref interface,
-                    version,
-                } => {
-                    if interface == "zwp_relative_pointer_manager_v1" {
-                        let relative_pointer_manager_proxy = registry
-                            .bind(version, id, move |pointer_manager| {
-                                pointer_manager.implement_closure(|_, _| (), ())
-                            })
-                            .unwrap();
-
-                        *seat_manager
-                            .relative_pointer_manager_proxy
-                            .try_borrow_mut()
-                            .unwrap() = Some(relative_pointer_manager_proxy);
-                    }
-                    if interface == "zwp_pointer_constraints_v1" {
-                        let pointer_constraints_proxy = registry
-                            .bind(version, id, move |pointer_constraints| {
-                                pointer_constraints.implement_closure(|_, _| (), ())
-                            })
-                            .unwrap();
-
-                        *seat_manager.pointer_constraints_proxy.lock().unwrap() =
-                            Some(pointer_constraints_proxy);
-                    }
-                    if interface == "wl_shm" {
-                        let shm: WlShm = registry
-                            .bind(version, id, move |shm| shm.implement_closure(|_, _| (), ()))
-                            .unwrap();
-
-                        (*shm_cell.borrow_mut()) = Some(shm);
-                    }
-                    if interface == "wl_compositor" {
-                        let compositor: WlCompositor = registry
-                            .bind(version, id, move |compositor| {
-                                compositor.implement_closure(|_, _| (), ())
-                            })
-                            .unwrap();
-                        (*compositor_cell.borrow_mut()) = Some(compositor);
-                    }
-
-                    if compositor_cell.borrow().is_some() && shm_cell.borrow().is_some() {
-                        let compositor = compositor_cell.borrow_mut().take().unwrap();
-                        let shm = shm_cell.borrow_mut().take().unwrap();
-                        let auto_themer = AutoThemer::init(None, compositor, &shm);
-                        cursor_manager_clone
-                            .lock()
-                            .unwrap()
-                            .set_auto_themer(auto_themer);
-                    }
-
-                    if interface == "wl_seat" {
-                        seat_manager.add_seat(id, version, registry)
-                    }
-                }
-                GlobalEvent::Removed { id, ref interface } => {
-                    if interface == "wl_seat" {
-                        seat_manager.remove_seat(id)
-                    }
-                }
-            },
-        )
-        .unwrap();
-
-        poll.register(&event_queue, EVQ_TOKEN, Ready::readable(), PollOpt::level())
-            .unwrap();*/
-
-        let auto_themer = AutoThemer::init(System, env.require_global(), env.require_global());
-        cursor_manager.lock().unwrap().set_auto_themer(auto_themer);
-
-        /*struct SeatManager {
-            sink: EventsSink,
-            store: Arc<Mutex<WindowStore>>,
-            //seats: Arc<Mutex<Vec<(u32, wl_seat::WlSeat)>>>,
-            relative_pointer_manager_proxy: Rc<RefCell<Option<ZwpRelativePointerManagerV1>>>,
-            pointer_constraints_proxy: Arc<Mutex<Option<ZwpPointerConstraintsV1>>>,
-            cursor_manager: Arc<Mutex<CursorManager>>,
-        }*/
         let relative_pointer_manager = env.get_global::<ZwpRelativePointerManagerV1>();
         env.listen_for_seats({
             let (event_loop, store, cursor_manager) = (event_loop.handle(), store.clone(), cursor_manager.clone());
@@ -445,7 +199,7 @@ impl<T: 'static> EventLoop<T> {
                     }
                 }
                 if seat_data.has_keyboard {
-                    let (_, source) = super::keyboard::map_keyboard(&seat, sink.clone(), modifiers_tracker.clone());
+                    let (_, repeat_source) = super::keyboard::map_keyboard(&seat, sink.clone(), modifiers_tracker.clone());
                      event_loop.insert_source(repeat_source, |_, _| {}).unwrap();
                 }
                 if seat_data.has_touch {
@@ -454,19 +208,10 @@ impl<T: 'static> EventLoop<T> {
             }
         });
 
-        let (user_sender, user_channel) = channel();
+        let (user_sender, user_channel) = unbounded();
 
-        /*poll.register(
-            &user_channel,
-            USER_TOKEN,
-            Ready::readable(),
-            PollOpt::level(),
-        )
-        .unwrap();*/
-
-        //let cursor_manager_clone = cursor_manager.clone();
         Ok(EventLoop {
-            poll,
+            event_loop,
             display: display.clone(),
             env: Arc::new(Mutex::new(env.clone())),
             user_sender,
@@ -517,58 +262,8 @@ impl<T: 'static> EventLoop<T> {
             &mut control_flow,
         );
 
-        //let mut event_loop = calloop::EventLoop::<EventLoopWindowTarget<T>>::new().unwrap();
-
-        //let event_loop = get_target(&self.window_target).event_loop.borrow_mut();
-        /*let event_loop = calloop::EventLoop::<EventLoopWindowTarget<T>>::new().unwrap();
-
-        event_loop
-         .handle()
-         .insert_source(WaylandSource::new(queue), |e, _| {
-             e.unwrap();
-         })
-         .unwrap();*/
-
-        //event_loop.run(None, &mut get_target(&self.window_target), |_| {
-        let mut events = Events::with_capacity(8);
         loop {
-            // Read events from the event queue
-            {
-                let mut queue = get_target(&self.window_target).queue.borrow_mut();
-
-                queue
-                    .dispatch_pending(&mut (), |_, _, _| {})
-                    .expect("failed to dispatch wayland events");
-
-                if let Some(read) = queue.prepare_read() {
-                    if let Err(e) = read.read_events() {
-                        if e.kind() != ErrorKind::WouldBlock {
-                            panic!("failed to read wayland events: {}", e);
-                        }
-                    }
-
-                    queue
-                        .dispatch_pending(&mut (), |_, _, _| {})
-                        .expect("failed to dispatch wayland events");
-                }
-            }
-            //event_loop.dispatch(Some(Duration::new(0,0)), &mut get_target(&self.window_target));
-
-            self.post_dispatch_triggers(&mut callback, &mut control_flow);
-
-            while let Ok(event) = self.kbd_channel.try_recv() {
-                let event = event.map_nonuser_event().unwrap();
-                sticky_exit_callback(event, &self.window_target, &mut control_flow, &mut callback);
-            }
-
-            while let Ok(event) = self.user_channel.try_recv() {
-                sticky_exit_callback(
-                    Event::UserEvent(event),
-                    &self.window_target,
-                    &mut control_flow,
-                    &mut callback,
-                );
-            }
+            self.event_loop.dispatch_pending(&mut get_target(&self.window_target), |_, _, _| {}).expect("Wayland connection lost.");
 
             // send Events cleared
             {
@@ -627,14 +322,9 @@ impl<T: 'static> EventLoop<T> {
             };
 
             match control_flow {
-                ControlFlow::Exit => break, //event_loop.get_signal().stop(),
+                ControlFlow::Exit => self.event_loop.get_signal().stop(),
                 ControlFlow::Poll => {
-                    //event_loop.dispatch(Some(Duration::new(0,0)), &mut get_target(&self.window_target));
-                    // non-blocking dispatch
-                    self.poll
-                        .poll(&mut events, Some(Duration::from_millis(0)))
-                        .unwrap();
-                    events.clear();
+                    self.event_loop.dispatch(Some(Duration::new(0,0)), &mut get_target(&self.window_target));
 
                     callback(
                         Event::NewEvents(StartCause::Poll),
@@ -644,9 +334,7 @@ impl<T: 'static> EventLoop<T> {
                 }
                 ControlFlow::Wait => {
                     if !instant_wakeup {
-                        //event_loop.dispatch(None, &mut get_target(&self.window_target));
-                        self.poll.poll(&mut events, None).unwrap();
-                        events.clear();
+                        self.event_loop.dispatch(None, &mut get_target(&self.window_target));
                     }
 
                     callback(
@@ -666,9 +354,7 @@ impl<T: 'static> EventLoop<T> {
                     } else {
                         Duration::from_millis(0)
                     };
-                    //event_loop.dispatch(Some(duration), &mut get_target(&self.window_target));
-                    self.poll.poll(&mut events, Some(duration)).unwrap();
-                    events.clear();
+                    self.event_loop.dispatch(Some(duration), &mut get_target(&self.window_target));
 
                     let now = Instant::now();
                     if now < deadline {

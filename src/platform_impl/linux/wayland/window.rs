@@ -19,24 +19,22 @@ use crate::{
 
 use smithay_client_toolkit::{
     environment::Environment,
-    get_surface_outputs,
-    //output::OutputHandler,
-    //output::with_output_info, get_surface_scale_factor, //OutputMgr,
     reexports::client::{
-        //protocol::{wl_seat, wl_surface},
-        protocol::wl_surface,
         Display,
+        protocol::wl_surface,
     },
-    //surface::{get_dpi_factor, get_outputs},
+    get_surface_outputs,
+    get_surface_scale_factor,
     window::{
-        ConceptFrame, Decorations, Event as WEvent, /*Frame,*/ State as WState,
+        ConceptFrame, Decorations, Event as WEvent, State as WState,
         Window as SWindow,
     },
 };
 
 use super::{
-    event_loop::{CursorManager, Env},
+    event_loop::Env,
     make_wid, EventLoopWindowTarget, MonitorHandle, WindowId,
+    cursor::CursorManager,
 };
 
 pub struct Window {
@@ -80,7 +78,7 @@ impl Window {
                 });
 
         // Always 1.
-        let scale_factor = get_dpi_factor(&surface);
+        let scale_factor = get_surface_scale_factor(&surface);
 
         let (width, height) = attributes
             .inner_size
@@ -327,7 +325,7 @@ impl Window {
 
     #[inline]
     pub fn scale_factor(&self) -> i32 {
-        unimplemented!() //get_dpi_factor(&self.surface)
+        get_surface_scale_factor(&self.surface)
     }
 
     pub fn set_decorations(&self, decorate: bool) {
