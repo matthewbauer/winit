@@ -113,7 +113,7 @@ pub enum WindowId {
 
 impl WindowId {
     pub unsafe fn dummy() -> Self {
-        WindowId::Wayland(wayland::WindowId::dummy())
+        WindowId::Wayland(Default::default())
     }
 }
 

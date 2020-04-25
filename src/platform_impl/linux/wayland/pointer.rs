@@ -6,16 +6,13 @@ use smithay_client_toolkit::{
             zwp_relative_pointer_v1::{self, ZwpRelativePointerV1},
         },
     },
+    get_surface_scale_factor,
     seat::pointer::ThemedPointer,
     window
 };
 type SCTKWindow = window::Window<window::ConceptFrame>;
 use crate::{dpi::LogicalPosition, event::{ElementState, MouseButton, WindowEvent, TouchPhase, MouseScrollDelta}};
-use super::{
-    DeviceId,
-    Sink,
-    cursor::CursorManager
-};
+use super::{Frame, DeviceId, Window};
 
 // Track focus and reconstruct scroll events
 #[derive(Default)] pub struct Pointer {
@@ -25,73 +22,59 @@ use super::{
 }
 
 impl Pointer {
-    fn handle(&mut self, event : Event, pointer: ThemedPointer, sink: &mut super::Sink, windows: &Windows, current_cursor: &'static str) {
+    fn handle(&mut self, event : Event, pointer: ThemedPointer, Frame{sink}: &mut Frame, windows: &[Window], current_cursor: &'static str) {
         let Self{focus, axis_buffer, axis_discrete_buffer} = self;
         match event {
-            Event::Enter { surface, surface_x:x,surface_y:y, .. } if let Some(wid) = store.find_wid(&surface) => {
+            Event::Enter { surface, surface_x:x,surface_y:y, .. } if let Some(window) = windows.find(&surface) => {
                 focus = Some(surface);
 
-                // TODO: Reload cursor style only when we enter winit's surface. Calling
-                // this function every time on `PtrEvent::Enter` could interfere with
-                // SCTK CSD handling, since it changes cursor icons when you hover
-                // cursor over the window borders.
-                pointer.set_cursor(current_cursor, None).expect("Unknown cursor");
+                // Reload cursor style only when we enter winit's surface.
+                // FIXME: Might interfere with CSD
+                pointer.set_cursor(window.current_cursor, None).expect("Unknown cursor");
 
-                sink.send_window_event(
+                sink(window_event(
                     WindowEvent::CursorEntered {
                         device_id: crate::event::DeviceId(
                             crate::platform_impl::DeviceId::Wayland(DeviceId),
                         ),
                     },
-                    wid,
-                );
+                    surface,
+                ));
 
-
-                sink.send_window_event(
+                sink(window_event(
                     WindowEvent::CursorMoved {
                         device_id: crate::event::DeviceId(
                             crate::platform_impl::DeviceId::Wayland(DeviceId),
                         ),
-                        position: LogicalPosition::new(surface_x, surface_y).to_physical(get_surface_scale_factor(&surface) as f64),
+                        position: LogicalPosition::new(x, y).to_physical(get_surface_scale_factor(&surface) as f64),
                     },
-                    wid,
-                );
+                    surface
+                ));
             }
             Event::Leave { surface, .. } => {
-                mouse_focus = None;
-                let wid = store.find_wid(&surface);
-                if let Some(wid) = wid {
-                    sink.send_window_event(
+                focus = None;
+                if windows.contains(&surface) {
+                    sink(window_event(
                         WindowEvent::CursorLeft {
                             device_id: crate::event::DeviceId(
                                 crate::platform_impl::DeviceId::Wayland(DeviceId),
                             ),
                         },
-                        wid,
-                    );
+                        surface
+                    ));
                 }
             }
-            Event::Motion {
-                surface_x,
-                surface_y,
-                ..
-            } if let Some(surface) = mouse_focus => {
-                let wid = make_wid(surface);
-
-                let scale_factor = get_surface_scale_factor(&surface);
-                let position =
-                    LogicalPosition::new(surface_x, surface_y).to_physical(scale_factor as f64);
-
-                sink.send_window_event(
-                    WindowEvent::CursorMoved {
+            Event::Motion { surface_x:x, surface_y:y, .. } if let Some(surface) = focus => {
+                sink(window_event(
+                   WindowEvent::CursorMoved {
                         device_id: crate::event::DeviceId(
                             crate::platform_impl::DeviceId::Wayland(DeviceId),
                         ),
-                        position,
-                        modifiers: modifiers_tracker.lock().unwrap().clone(),
+                        position: LogicalPosition::new(surface_x, surface_y).to_physical(get_surface_scale_factor(&surface) as f64),
+                        modifiers,
                     },
-                    wid,
-                );
+                   surface
+                ));
             }
             Event::Button { button, state, .. } if let Some(surface) = mouse_focus.as_ref() => {
                 state = if let ButtonState::Pressed = state
@@ -104,7 +87,7 @@ impl Pointer {
                     0x112 => MouseButton::Middle,
                     other => MouseButton::Other(other),
                 };
-                sink.send_window_event(
+                sink(window_event(
                     WindowEvent::MouseInput {
                         device_id: crate::event::DeviceId(
                             crate::platform_impl::DeviceId::Wayland(DeviceId),
@@ -113,59 +96,42 @@ impl Pointer {
                         button,
                         modifiers: modifiers_tracker.lock().unwrap().clone(),
                     },
-                    make_wid(surface),
-                );
+                    surface
+                ));
             }
             Event::Axis { axis, value, .. } if let Some(surface) = focus => {
                 let wid = make_wid(surface);
                 let (mut x, mut y) = axis_buffer.unwrap_or((0.0, 0.0));
                 match axis {
                     // wayland vertical sign convention is the inverse of winit
-                    Axis::VerticalScroll => y -= value as f32,
-                    Axis::HorizontalScroll => x += value as f32,
+                    Axis::VerticalScroll => y -= value,
+                    Axis::HorizontalScroll => x += value,
                     _ => unreachable!(),
                 }
                 axis_buffer = Some((x, y));
-                axis_state = match axis_state {
+                phase = match phase {
                     TouchPhase::Started | TouchPhase::Moved => TouchPhase::Moved,
                     _ => TouchPhase::Started,
                 }
             }
             Event::Frame => {
-                let axis_buffer = axis_buffer.take();
-                let axis_discrete_buffer = axis_discrete_buffer.take();
-                if let Some(surface) = mouse_focus {
-                    let wid = make_wid(surface);
-                    if let Some((x, y)) = axis_discrete_buffer {
-                        sink.send_window_event(
-                            WindowEvent::MouseWheel {
-                                device_id: crate::event::DeviceId(
-                                    crate::platform_impl::DeviceId::Wayland(DeviceId),
-                                ),
-                                delta: MouseScrollDelta::LineDelta(x as f32, y as f32),
-                                phase: axis_state,
-                                modifiers: modifiers_tracker.lock().unwrap().clone(),
-                            },
-                            wid,
-                        );
-                    } else if let Some((x, y)) = axis_buffer {
-                        sink.send_window_event(
-                            WindowEvent::MouseWheel {
-                                device_id: crate::event::DeviceId(
-                                    crate::platform_impl::DeviceId::Wayland(DeviceId),
-                                ),
-                                delta: MouseScrollDelta::PixelDelta((x as f64, y as f64).into()),
-                                phase: axis_state,
-                                modifiers: modifiers_tracker.lock().unwrap().clone(),
-                            },
-                            wid,
-                        );
-                    }
+                let delta =
+                    if Some(x,y) = axis_buffer.take() { MouseScrollDelta::PixelDelta(x as f64,y as f64) }
+                    else if Some(x,y) = axis_discrete_buffer.take() { MouseScrollDelta::LineDelta(x as f32,y as f32) }
+                    else { debug_assert!(false); MouseScrollDelta::PixelDelta(0,0) };
+                if let Some(surface) = focus {
+                    sink(window_event(
+                        WindowEvent::MouseWheel {
+                            device_id: crate::event::DeviceId(crate::platform_impl::DeviceId::Wayland(DeviceId)),
+                            delta, phase, modifiers,
+                        },
+                        surface
+                    ));
                 }
             }
             Event::AxisSource { .. } => (),
             Event::AxisStop { .. } => {
-                axis_state = TouchPhase::Ended;
+                phase = TouchPhase::Ended;
             }
             Event::AxisDiscrete { axis, discrete } => {
                 let (mut x, mut y) = axis_discrete_buffer.unwrap_or((0, 0));
@@ -176,7 +142,7 @@ impl Pointer {
                     _ => unreachable!(),
                 }
                 axis_discrete_buffer = Some((x, y));
-                axis_state = match axis_state {
+                phase = match phase {
                     TouchPhase::Started | TouchPhase::Moved => TouchPhase::Moved,
                     _ => TouchPhase::Started,
                 }

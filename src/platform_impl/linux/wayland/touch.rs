@@ -8,7 +8,7 @@ use smithay_client_toolkit::{
     },
 };
 use crate::{dpi::LogicalPosition, event::{TouchPhase, WindowEvent}};
-use super::{Sink, DeviceId};
+use super::{DeviceId, Frame};
 
 struct TouchPoint {
     surface: WlSurface,
@@ -22,7 +22,7 @@ impl std::cmp::PartialEq {
 type Touch = Vec<TouchPoint>;
 
 impl Touch {
-    fn handle(&mut self, event: Event, windows: &mut Windows) {
+    fn handle(&mut self, event: Event, Frame{windows, ..}: &mut Frame) {
         match event {
             Event::Down {surface, id, x, y, ..} if let Some(wid) = store.find_wid(&surface) => {
                 let position = LogicalPosition::new(x, y);

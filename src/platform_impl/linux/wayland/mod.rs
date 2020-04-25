@@ -3,17 +3,23 @@
 
 pub use self::{
     event_loop::{EventLoop, EventLoopProxy, EventLoopWindowTarget, MonitorHandle, VideoMode},
-    window::Window,
+    window::WinitWindow as Window,
 };
 
-trait Sink<T> = FnMut(crate::event::Event<T>, &crate::event_loop::EventLoopWindowTarget<T>, &mut crate::event_loop::ControlFlow)+'static;
+type Sink<T> = FnMut(crate::event::Event<T>, &crate::event_loop::EventLoopWindowTarget<T>, &mut crate::event_loop::ControlFlow)+'static;
+
+// A frame of event processing
+struct Frame<'t, S> {
+    sink: &'t S,
+}
 
 mod event_loop;
 mod keyboard;
 mod pointer;
 mod touch;
 mod window;
-mod cursor;
+//mod cursor;
+mod conversion;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DeviceId;
@@ -24,11 +30,4 @@ impl DeviceId {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WindowId(u32);
-
-impl WindowId {
-    pub unsafe fn dummy() -> Self {
-        WindowId(0)
-    }
-}
+pub type WindowId = u32;

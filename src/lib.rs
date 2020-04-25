@@ -132,6 +132,8 @@
 //#![deny(rust_2018_idioms)]
 #![deny(intra_doc_link_resolution_failure)]
 
+#![cfg_attr(feature="smithay-client-toolkit",feature(let_chains))]
+
 #[allow(unused_imports)]
 #[macro_use]
 extern crate lazy_static;
