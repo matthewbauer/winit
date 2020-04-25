@@ -12,7 +12,7 @@ use smithay_client_toolkit::{
 };
 type SCTKWindow = window::Window<window::ConceptFrame>;
 use crate::{dpi::LogicalPosition, event::{ElementState, MouseButton, WindowEvent, TouchPhase, MouseScrollDelta}};
-use super::{Frame, DeviceId, Window};
+use super::{Update, DeviceId, window::WindowState};
 
 // Track focus and reconstruct scroll events
 #[derive(Default)] pub struct Pointer {
@@ -22,10 +22,10 @@ use super::{Frame, DeviceId, Window};
 }
 
 impl Pointer {
-    fn handle(&mut self, event : Event, pointer: ThemedPointer, Frame{sink}: &mut Frame, windows: &[Window], current_cursor: &'static str) {
+    fn handle(&mut self, event : Event, pointer: ThemedPointer, Frame{sink}: &mut Frame, windows: &[WindowState], current_cursor: &'static str) {
         let Self{focus, axis_buffer, axis_discrete_buffer} = self;
         match event {
-            Event::Enter { surface, surface_x:x,surface_y:y, .. } if let Some(window) = windows.find(&surface) => {
+            Event::Enter { surface, surface_x:x,surface_y:y, .. } if let Some(window) = windows.iter().find(&surface) => {
                 focus = Some(surface);
 
                 // Reload cursor style only when we enter winit's surface.

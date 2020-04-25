@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 use smithay_client_toolkit::{
-    reexports::calloop::{EventLoop, channel::{channel as unbounded, Sender, Channel as Receiver}},
+    reexports::calloop::{self, channel::{channel as unbounded, Sender, Channel as Receiver}},
     default_environment,
     environment::{Environment, SimpleGlobal},
     init_default_environment,
@@ -21,31 +21,28 @@ use smithay_client_toolkit::{
             },
         },
         protocols::unstable::{
-            pointer_constraints::v1::client::{
-                zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
-            },
+            pointer_constraints::v1::client::zwp_pointer_constraints_v1::{ZwpPointerConstraintsV1, Lifetime},
             relative_pointer::v1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
         },
     },
     output::with_output_info,
-    window::{Window, ConceptFrame},
+    window::{Window, ConceptFrame, Decorations},
 };
 use crate::{
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{
-        DeviceEvent, DeviceId as RootDeviceId, Event as Variant, ModifiersState, StartCause, WindowEvent as Event,
+        DeviceEvent, DeviceId as RootDeviceId, Event as Item, ModifiersState, StartCause, WindowEvent as Event,
     },
-    event_loop::{ControlFlow, EventLoopClosed, EventLoopWindowTarget as WinitData},
+    event_loop::{ControlFlow, EventLoopClosed, EventLoopWindowTarget},
     monitor::{MonitorHandle as RootMonitorHandle, VideoMode as RootVideoMode},
     platform_impl::platform::{
         DeviceId as PlatformDeviceId, MonitorHandle as PlatformMonitorHandle,
         VideoMode as PlatformVideoMode, WindowId,
     },
-    window::WindowId as NewTypeWindowId, // should be an alias !
 };
 use super::{
     window::{Window as WindowState, DecorationsAction},
-    DeviceId, WaylandWindowId,
+    DeviceId, WindowId as WaylandWindowId,
 };
 
 default_environment!(Env, desktop,
@@ -59,9 +56,9 @@ default_environment!(Env, desktop,
     ]
 );
 
-pub fn wid(window: &Window) { NewTypeWindowId(PlatformWindowId::Wayland(window.surface.id()) }
-pub fn window_event(event: WindowEvent<'static>, surface: &WlSurface) -> Event {
-    Event { event, window_id: wid(surface.id()) }
+pub struct Window {
+    surface: WlSurface,
+    size: (u32, u32), scale_factor: u32,
 }
 
 /// Mutable state, time shared by handlers on main thread
@@ -70,13 +67,13 @@ pub struct State {
     pub env: Environment<Env>,
     keyboard: super::keyboard::Keyboard,
     pointers: Vec<super::pointer::Pointer>,
-    windows: Vec<Window<ConceptFrame>>,
-    window_states: Vec<Weak<Mutex<WindowState>>>, // Configure
+    sctk_windows: Vec<Window<ConceptFrame>>,
+    windows: Arc<Mutex<Vec<Window>>>,
     update: Sender<WindowState>,
 }
 
 // pub impl Deref<..> EventLoop, Window::new(..)
-type EventLoopWindowTarget<T> = State; // +Marker?
+//type EventLoopWindowTarget<T> = State; // +Marker?
 
 /*impl<T> EventLoopWindowTarget<T> {
     pub fn display(&self) -> &Display {
@@ -102,8 +99,11 @@ impl<T> EventLoop<T> {
         }
         let mut event_loop = calloop::EventLoop::<DispatchData<T>>::new().unwrap();
 
-        let (waker, receiver) = unbounded();
-        event_loop.insert_source(receiver, |id, _, state| {
+        let (user, receiver) = unbounded();
+        event_loop.insert_source(receiver, |item, _, state| {
+            let DispatchData{update:Update{sink, .. }} = data.get().unwrap();
+            sink(Event::UserEvent(item));
+        });
 
         use smithay_client_toolkit::{default_environment, init_default_environment, WaylandSource, seat};
         default_environment!(Env, desktop);
@@ -151,9 +151,9 @@ impl<T> EventLoop<T> {
                             Event::RelativeMotion { dx, dy, .. } => {
                                 let Context{frame: Frame{sink}} = data.get().unwrap();
                                 sink(Event::DeviceEvent {
-                                    event: DeviceEvent::MouseMotion { delta: (dx, dy) }
+                                    event: DeviceEvent::MouseMotion { delta: (dx, dy) },
                                     device_id: RootDeviceId(PlatformDeviceId::Wayland(DeviceId)),
-                                }
+                                });
                             }
                             _ => unreachable!(),
                         });
@@ -185,38 +185,34 @@ impl<T> EventLoop<T> {
 
         // Sync window state
         let (update, receiver) = unbounded();
-        event_loop.insert_source(receiver, |id, _, data| {
-            let DispatchData{frame: Frame{sink}, state} = data;
-            let state = state.window_states.find(id);
-            if let Some(state) = state && let Some(state) = state.upgrade() {
-                if let Some(window) = state.windows.find(id) {
-                    if state.decorate {
-                        window.set_decorate(window::Decorations::FollowServer);
-                    } else {
-                        window.set_decorate(window::Decorations::None);
-                    }
-
-                    {let (w, h) = window.size; window.resize(w, h);}
-                    window.refresh();
-                }
-                if let Some(pointer_constraints) = env.get_global() {
-                    state.pointer_constraints = self.pointers.iter().filter(|_| state.grab_cursor).map(
-                        |pointer| pointer_constraints.lock_pointer(surface, pointer, None, Lifetime::Persistent.to_raw())
-                    ).collect();
-                }
+        event_loop.insert_source(receiver, |state@WindowState{surface}, _, data| {
+            let DispatchData{State{windows, sctk_windows, redraw_events}} = data;
+            let window = windows.find(surface).unwrap();
+            let sctk_window = sctk_windows.find(id).unwrap();
+            if window.size != state.size || window.scale_factor != state.scale_factor {
+                redraw_events.push(sink(event(Event::RedrawRequested, window.surface)));
+                {let (w, h) = state.size; sctk_window.resize(w, h);}
+                sctk_window.refresh();
+            }
+            if state.decorate { sctk_window.set_decorate(Decorations::FollowServer); }
+            else { sctk_window.set_decorate(Decorations::None); }
+            if let Some(pointer_constraints) = env.get_global() {
+                state.pointer_constraints = self.pointers.iter().filter(|_| state.grab_cursor).map(
+                    |pointer| pointer_constraints.lock_pointer(surface, pointer, None, Lifetime::Persistent.to_raw())
+                ).collect();
+            }
             } else {
-                sink(Event{ window_id: wid(&window.surface), event: WindowEvent::Destroyed });
+                sink(Event{ window_id: wid(&window.surface), event: Event::Destroyed });
                 if let Some(window) = state.windows.remove_item(id) { window.surface().destroy(); }
             }
         });
 
         Ok(Self{
             state: State{
-                display
-                env
+                display,
+                env,
                 update,
                 sink,
-                ..//Default::default()
             },
             waker
         })
@@ -246,26 +242,26 @@ impl<T> EventLoop<T> {
     }
 
     pub fn run_return<S:Sink<T>>(&mut self, mut sink: S) {
-        let yield = |event, state| {
+        let sink = |event, state| {
             sink(
                 event,
-                &mut crate::EventLoopWindowTarget{p: crate::platform_impl::EventLoopWindowTarget::Wayland(state), ../*Default::default()*/ },
+                &mut crate::EventLoopWindowTarget{p: crate::platform_impl::EventLoopWindowTarget::Wayland(state)},
                 if state.control_flow == ControlFlow::Exit { &mut ControlFlow::Exit } else { &mut control_flow }, // sticky exit
             )
         };
 
-        yield(Event::NewEvents(StartCause::Init), state);
+        sink(Event::NewEvents(StartCause::Init), state);
 
         loop {
             match control_flow {
                 ControlFlow::Exit => break,
                 ControlFlow::Poll => {
                     event_loop.dispatch(std::time::Duration(0,0), &mut DispatchData{frame: Frame{sink}, state: &mut state});
-                    yield(Event::NewEvents(StartCause::Poll), state);
+                    sink(Event::NewEvents(StartCause::Poll), state);
                 }
                 ControlFlow::Wait => {
                     event_loop.dispatch(None, &mut DispatchData{frame: Frame{sink}, state: &mut state});
-                    yield(Event::NewEvents(StartCause::WaitCancelled{start: Instant::now(), requested_resume: None}, state);
+                    sink(Event::NewEvents(StartCause::WaitCancelled{start: Instant::now(), requested_resume: None}), state);
                 }
                 ControlFlow::WaitUntil(deadline) => {
                     let start = Instant::now();
@@ -274,7 +270,7 @@ impl<T> EventLoop<T> {
 
                     let now = Instant::now();
                     if now < deadline {
-                        yield(
+                        sink(
                             Event::NewEvents(StartCause::WaitCancelled {
                                 start,
                                 requested_resume: Some(deadline),
@@ -292,16 +288,12 @@ impl<T> EventLoop<T> {
                     }
                 }
             }
-            yield(Event::MainEventsCleared, state);
-            for surface in state.redraw_requests {
-                if redraw_requested {
-                    windows.find(surface).refresh();
-                    yield(Event::RedrawRequested(wid(surface), state);
-                }
-            }
-            yield(Event::RedrawEventsCleared, state);
+            sink(Event::MainEventsCleared, state);
+            // sink.send_all(state.redraw_events.drain(..));
+            for event in state.redraw_events.drain(..) { sink(event) }
+            sink(Event::RedrawEventsCleared, state);
         }
-        yield(Event::LoopDestroyed, state);
+        sink(Event::LoopDestroyed, state);
     }
 
     pub fn primary_monitor(&self) -> MonitorHandle {

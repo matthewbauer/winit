@@ -1,18 +1,6 @@
-/*use std::sync::{Arc, Mutex};
-use smithay_client_toolkit::{
-    reexports::client::{
-        protocol::{wl_keyboard, wl_seat},
-        Attached,
-    },
-    seat::keyboard::{self, Event as KbEvent, /*RepeatEvent,*/ RepeatKind, RepeatSource},
-};
-use super::{event_loop::EventsSink, DeviceId};
-use crate::event::{ElementState, KeyboardInput, ModifiersState, VirtualKeyCode, WindowEvent};*/
-
 use std::{rc::Rc, cell::Cell, time::{Instant, Duration}};
-//use futures::{future::FutureExt, stream::Stream};
 pub use smithay_client_toolkit::seat::keyboard::{Event, KeyState};
-use {super::Frame, crate::{event::{ElementState, ModifiersState, WindowEvent, KeyboardInput}}, super::conversion};
+use {super::Update, crate::{event::{ElementState, ModifiersState, WindowEvent, KeyboardInput}}, super::conversion};
 
 // Track modifiers and key repetition
 #[derive(Default)] pub struct Keyboard {

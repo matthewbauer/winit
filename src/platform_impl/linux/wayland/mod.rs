@@ -3,15 +3,17 @@
 
 pub use self::{
     event_loop::{EventLoop, EventLoopProxy, EventLoopWindowTarget, MonitorHandle, VideoMode},
-    window::WinitWindow as Window,
 };
 
 type Sink<T> = FnMut(crate::event::Event<T>, &crate::event_loop::EventLoopWindowTarget<T>, &mut crate::event_loop::ControlFlow)+'static;
 
-// A frame of event processing
-struct Frame<'t, S> {
+// Application state update
+struct Update<'t, S> {
     sink: &'t S,
 }
+
+pub fn window_id(window: &Window) { crate::window::WindowId(super::super::WindowId::Wayland(window.surface.id())) }
+pub fn event(event: WindowEvent<'static>, surface: &WlSurface) -> Event { Event { event, window_id: window_id(surface.id()) } }
 
 mod event_loop;
 mod keyboard;

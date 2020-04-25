@@ -8,7 +8,6 @@ use smithay_client_toolkit::{
     },
 };
 use crate::{dpi::LogicalPosition, event::{TouchPhase, WindowEvent}};
-use super::{DeviceId, Frame};
 
 struct TouchPoint {
     surface: WlSurface,
@@ -22,72 +21,65 @@ impl std::cmp::PartialEq {
 type Touch = Vec<TouchPoint>;
 
 impl Touch {
-    fn handle(&mut self, event: Event, Frame{windows, ..}: &mut Frame) {
+    fn handle(&mut self, /*windows: &[super::window::WindowState],*/ event: Event) {
+        let device_id = crate::event::DeviceId(super::super::DeviceId::Wayland(super::DeviceId));
         match event {
-            Event::Down {surface, id, x, y, ..} if let Some(wid) = store.find_wid(&surface) => {
+            Event::Down {surface, id, x, y, ..} /*if windows.contains(&surface)*/ => {
                 let position = LogicalPosition::new(x, y);
-                sink.send_window_event(
+                sink(event(
                     WindowEvent::Touch(crate::event::Touch {
-                        device_id: crate::event::DeviceId(
-                            crate::platform_impl::DeviceId::Wayland(DeviceId),
-                        ),
+                        device_id,
                         phase: TouchPhase::Started,
                         location: position.to_physical(get_surface_scale_factor(&surface) as f64),
                         force: None, // TODO
                         id: id as u64,
                     }),
-                    wid,
-                );
+                    surface.id(),
+                ));
                 self.push(TouchPoint{
                     surface,
                     position,
                     id,
                 });
             }
-            Event::Up { id, .. } if let Some(point) = self.remove_item(|p| p.id == id) => {
-                sink.send_window_event(
+            Event::Up { id, .. } if let Some(point) = self.remove_item(id) => {
+                sink(event(
                     WindowEvent::Touch(crate::event::Touch {
-                        device_id: crate::event::DeviceId(
-                            crate::platform_impl::DeviceId::Wayland(DeviceId),
-                        ),
+                        device_id,
                         phase: TouchPhase::Ended,
                         location: point.position.to_physical(get_surface_scale_factor(&point.surface) as f64),
                         force: None, // TODO
                         id: id as u64,
                     }),
-                    make_wid(&point.surface),
-                );
+                    &point.surface,
+                ));
             }
             Event::Motion { id, x, y, .. } if let Some(point) = self.iter_mut().find(id) => {
                 point.position = LogicalPosition::new(x, y);
-                sink.send_window_event(
+                sink(event(
                     WindowEvent::Touch(crate::event::Touch {
-                        device_id: crate::event::DeviceId(
-                            crate::platform_impl::DeviceId::Wayland(DeviceId),
-                        ),
+                        device_id,
                         phase: TouchPhase::Moved,
                         location: point.position.to_physical(get_surface_scale_factor(&point.surface) as f64),
                         force: None, // TODO
                         id: id as u64,
                     }),
-                    make_wid(&point.surface),
-                );
+                    &point.surface,
+                ));
             }
             Event::Frame => (),
             Event::Cancel => {
                 for point in self.drain(..) {
-                    sink.send_window_event(
+                    sink(event(
                         WindowEvent::Touch(crate::event::Touch {
-                            device_id: crate::event::DeviceId(
-                                crate::platform_impl::DeviceId::Wayland(DeviceId),
-                            ),
+                            device_id,
                             phase: TouchPhase::Cancelled,
                             location: point.position.to_physical(get_surface_scale_factor(&point.surface) as f64),
                             force: None, // TODO
                             id: point.id as u64,
                         }),
-                        make_wid(&point.surface),
-                    );
+                        &point.surface,
+                    ));
                 }
             }
             _ => println!("Unexpected touch state"),

@@ -18,6 +18,7 @@ use smithay_client_toolkit::{
     },
 };
 use crate::{
+    event::Event,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Position, Size},
     error::{ExternalError, NotSupportedError, OsError as RootOsError},
     monitor::MonitorHandle as RootMonitorHandle,
@@ -35,12 +36,10 @@ use super::{
 
 pub struct WindowState {
     surface: WlSurface,
-    size: (u32, u32),
-    title: String
+    size: (u32, u32), scale_factor: u32,
     current_cursor: &'static str,
-    scale_factor: u32,
-    resized: bool,
-    need_refresh: bool,
+    drop: bool,
+    title: String,
     fullscreen: bool,
     decorated: bool,
     min_size: (u32, u32),
@@ -59,9 +58,10 @@ impl PartialEq for WindowState {
 }
 
 pub struct WindowHandle {
-    display: *Display,
+    display: *mut Display,
     env: Environment<Env>,
-    state: Arc<Mutex<WindowState>>, // Arc<Mutex> so EventLoop::window_states editions reflect back on the handle
+    windows: Arc<Mutex<Vec<Window>>>, // Reflect back size, scale_factor Configure changes to handle
+    state: WindowState, // Arc<Mutex> so EventLoop::window_states editions reflect back on the handle
     update: Sender<u32>, // Wakes up EventLoop if configuring Window from another thread
 }
 type Window = WindowHandle;
@@ -85,23 +85,14 @@ impl Window {
                 for window in states.find_item(window).iter_mut() {
                     window.scale_factor = scale;
                     let size = LogicalSize::<f64>::from(window.size).to_physical(scale);
-                    sink(Event::WindowEvent {
-                        window_id: wid(&surface),
-                        event: WindowEvent::ScaleFactorChanged {
-                            scale_factor,
-                            new_inner_size: &mut size,
-                        },
-                    });
+                    sink(event(Event::ScaleFactorChanged{scale_factor, new_inner_size: &mut size}, &surface));
                     window.size = size.to_logical(scale).into();
                 }
             }
         );
 
         let scale_factor = get_surface_scale_factor(&surface); // Always 1.
-        let size = attributes
-            .inner_size
-            .map(|size| size.to_logical::<f64>(scale_factor as f64).into())
-            .unwrap_or((800, 600));
+        let size = attributes.inner_size.map(|size| size.to_logical::<f64>(scale_factor as f64).into()).unwrap_or((800, 600));
         let fullscreen = false;
         let decorated = attributes.decorations;
         let mut window = state.env.create_window::<ConceptFrame, _>(surface.clone(), size, {
@@ -110,27 +101,22 @@ impl Window {
                 let DispatchData{frame: Frame{sink}, state} = data.get().unwrap();
                 match event {
                     Event::Configure { new_size, states } => {
-                        sink(Event::WindowEvent { window_id: wid(surface), event: WindowEvent::Resized(LogicalSize::from(new_size).to_physical(scale))});
+                        sink(event(Event::Resized(LogicalSize::from(new_size).to_physical(scale)), &surface));
                         for window in state.window_states.find(surface).iter_mut() {
                             window.size = new_size;
                             window.fullscreen = states.contains(&WState::Fullscreen);
-                            window.need_refresh = true;
+                            //window.need_refresh = true;
                             state.update.send(wid(surface));
                         }
                     }
                     Event::Refresh => {
-                        for window in state.window_states.find(surface).iter_mut() {
-                            window.need_refresh = true;
-                            state.update.send(wid(surface));
-                        }
+                        //for window in state.window_states.find(surface).iter_mut() { window.need_refresh = true;  state.update.send(wid(surface)); }
+                        for window in state.windows.find(surface).iter_mut() { window.refresh(); }
                     }
-                    Event::Close => {
-                        sink(Event::WindowEvent{ window_id: wid(surface), event: WindowEvent::CloseRequested });
-                    }
+                    Event::Close => sink(event(Event::CloseRequested, &surface)),
                 }
             }
-        )
-        .unwrap();
+        }).unwrap();
 
         if let Some(app_id) = attributes_ext.app_id {
             window.set_app_id(app_id);
@@ -166,62 +152,24 @@ impl Window {
         window.set_title(attributes.title);
 
         // min-max dimensions
-        window.set_min_size(
-            attributes
-                .min_inner_size
-                .map(|size| size.to_logical::<f64>(scale_factor as f64).into()),
-        );
-        window.set_max_size(
-            attributes
-                .max_inner_size
-                .map(|size| size.to_logical::<f64>(scale_factor as f64).into()),
-        );
+        window.set_min_size(attributes.min_inner_size.map(|size| size.to_logical::<f64>(scale_factor as f64).into()));
+        window.set_max_size(attributes.max_inner_size.map(|size| size.to_logical::<f64>(scale_factor as f64).into()));
 
         state.windows.push(window);
         Ok(Window{display, id, size})
     }
 
-    #[inline]
-    pub fn id(&self) -> WindowId {
-        id
-    }
-
+    pub fn id(&self) -> WindowId { id }
     pub fn set_title(&self, title: &str) {
         self.title = title.into();
         self.update.send(self);
     }
-
-    pub fn set_visible(&self, _visible: bool) {
-        // TODO
-    }
-
-    #[inline]
-    pub fn outer_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> {
-        Err(NotSupportedError::new())
-    }
-
-    #[inline]
-    pub fn inner_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> {
-        Err(NotSupportedError::new())
-    }
-
-    #[inline]
-    pub fn set_outer_position(&self, _pos: Position) {
-        // Not possible with wayland
-    }
-
-    pub fn inner_size(&self) -> PhysicalSize<u32> {
-        let scale_factor = self.scale_factor as f64;
-        let size = LogicalSize::<f64>::from(self.size);
-        size.to_physical(scale_factor)
-    }
-
-    pub fn request_redraw(&self) {
-        self.need_refresh = true;
-        self.update.send(self);
-    }
-
-    #[inline]
+    pub fn set_visible(&self, _visible: bool) { /*todo*/ }
+    pub fn outer_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> { Err(NotSupportedError::new()) }
+    pub fn inner_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> { Err(NotSupportedError::new()) }
+    pub fn set_outer_position(&self, _pos: Position) { /*todo*/ }
+    pub fn inner_size(&self) -> PhysicalSize<u32> { LogicalSize::<f64>::from(self.size).to_physical(self.scale_factor as f64) }
+    pub fn request_redraw(&self) { self.need_refresh = true; self.update.send(self); }
     pub fn outer_size(&self) -> PhysicalSize<u32> {
         self.inner_size(); // fixme
     }
@@ -236,14 +184,14 @@ impl Window {
     #[inline]
     pub fn set_min_inner_size(&self, dimensions: Option<Size>) {
         let scale_factor = self.scale_factor() as f64;
-        self.min_size = dimensions.map(|dim| dim.to_logical::<f64>(scale_factor).into()));
+        self.min_size = dimensions.map(|dim| dim.to_logical::<f64>(scale_factor).into());
         self.update.send(self);
     }
 
     #[inline]
     pub fn set_max_inner_size(&self, dimensions: Option<Size>) {
         let scale_factor = self.scale_factor() as f64;
-        self.max_size = dimensions.map(|dim| dim.to_logical::<f64>(scale_factor).into()));
+        self.max_size = dimensions.map(|dim| dim.to_logical::<f64>(scale_factor).into());
         self.update.send(self);
     }
 
@@ -302,13 +250,13 @@ impl Window {
 
     #[inline]
     pub fn set_cursor_icon(&self, cursor: CursorIcon) {
-        self.current_cursor = cursor
+        self.current_cursor = cursor;
         self.update.send(self);
     }
 
     #[inline]
     pub fn set_cursor_visible(&self, visible: bool) {
-        self.cursor_visible = visible
+        self.cursor_visible = visible;
         self.update.send(self);
     }
 
@@ -324,7 +272,7 @@ impl Window {
         Err(ExternalError::NotSupported(NotSupportedError::new()))
     }
 
-    pub fn display(&self) -> *Display {
+    pub fn display(&self) -> *mut Display {
         self.display
     }
 

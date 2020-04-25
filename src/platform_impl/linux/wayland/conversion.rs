@@ -10,7 +10,7 @@ pub(crate) fn modifiers(mods: keyboard::ModifiersState) -> ModifiersState {
     m
 }
 
-fn cursor(&mut self, cursor: CursorIcon) -> &'static str {
+fn cursor(cursor: CursorIcon) -> &'static str {
     match cursor {
         CursorIcon::Alias => "link",
         CursorIcon::Arrow => "arrow",
