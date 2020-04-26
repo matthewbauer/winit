@@ -9,13 +9,14 @@ use {super::Update, crate::{event::{ElementState, ModifiersState, WindowEvent, K
 }
 
 impl Keyboard {
-    fn handle<T>(&mut self, Frame{sink, ..}: &mut Frame<T>, event: Event, is_synthetic: bool) {
+    fn handle<T>(&mut self, Update{sink, ..}: &mut Update<T>, event: Event, is_synthetic: bool) {
         let Self{modifiers, repeat} = self;
+        let event = |e,s| sink(event(e), s);
         match event {
             Event::Enter { surface, .. } => {
-                sink.send_window_event(WindowEvent::Focused(true), surface.id());
+                event(Event::Focused(true), surface);
                 /*if !modifiers.is_empty() ?*/ {
-                    sink.send_window_event(WindowEvent::ModifiersChanged(modifiers), surface.id());
+                    event(Event::ModifiersChanged(modifiers), surface);
                 }
             }
             Event::Leave { surface, .. } => {
@@ -23,7 +24,7 @@ impl Keyboard {
                 /*if !modifiers.is_empty() {
                     sink.send_window_event(WindowEvent::ModifiersChanged(ModifiersState::empty()), wid);
                 }*/
-                sink.send_window_event(WindowEvent::Focused(false), surface.id());
+                event(Event::Focused(false), surface);
             }
             key @ Event::Key{ surface, rawkey, state, utf8, .. } => {
                 /*if state == KeyState::Pressed {
@@ -49,9 +50,9 @@ impl Keyboard {
                 } else {
                     if repeat.filter(|r| r.get()==event).is_some() { repeat = None }
                 }*/
-                sink.send_window_event(
+                event(
                     #[allow(deprecated)]
-                    WindowEvent::KeyboardInput {
+                    Event::KeyboardInput {
                         device_id: crate::platform_impl::DeviceId::Wayland(super::DeviceId),
                         input: KeyboardInput {
                             state,
@@ -65,15 +66,14 @@ impl Keyboard {
                 );
                 if let Some(txt) = utf8 {
                     for char in txt.chars() {
-                        sink.send_window_event(WindowEvent::ReceivedCharacter(char), surface.id());
+                        event(Event::ReceivedCharacter(char), surface);
                     }
                 }
             }
             Event::Modifiers { surface, modifiers: new_modifiers, .. } => {
                 *modifiers = conversion::modifiers(new_modifiers);
-                sink.send_window_event(WindowEvent::ModifiersChanged(modifiers), surface.id());
+                event(Event::ModifiersChanged(modifiers), surface);
             }
         }
     }
 }
-

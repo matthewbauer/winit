@@ -76,7 +76,7 @@ features = [
 ]
 
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
-smithay-client-toolkit = '^0.9'
+smithay-client-toolkit = { version = '^0.9' }
 x11-dl = { version = "2.18.5", optional=true }
 percent-encoding = "2.1"
 

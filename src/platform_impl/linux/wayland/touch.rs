@@ -4,10 +4,11 @@ use smithay_client_toolkit::{
     reexports::client::protocol::{
         wl_seat,
         wl_surface::WlSurface,
-        wl_touch::{Event, WlTouch},
+        wl_touch::{self, WlTouch},
     },
 };
-use crate::{dpi::LogicalPosition, event::{TouchPhase, WindowEvent}};
+use crate::{dpi::LogicalPosition, event::{Touch as Event, TouchPhase, WindowEvent}};
+use super::Sink;
 
 struct TouchPoint {
     surface: WlSurface,
@@ -18,68 +19,34 @@ impl std::cmp::PartialEq {
     fn eq(&self, other: &Self) -> bool { self.id == other.id }
 }
 
-type Touch = Vec<TouchPoint>;
+// Track touch points
+pub type Touch = Vec<TouchPoint>;
 
 impl Touch {
-    fn handle(&mut self, /*windows: &[super::window::WindowState],*/ event: Event) {
+    fn handle(&mut self, sink: impl Sink, /*windows: &[super::window::WindowState],*/ event: Event) {
         let device_id = crate::event::DeviceId(super::super::DeviceId::Wayland(super::DeviceId));
+        let sink = |phase,TouchPoint{surface, id, position}| {
+            let e = Touch {device_id, phase, location: position.to_physical(get_surface_scale_factor(&surface) as f64), force: None/*TODO*/, id: id as u64};
+            sink(event(Event::Touch(e), surface));
+        };
+        use wl_touch::Event::*;
         match event {
-            Event::Down {surface, id, x, y, ..} /*if windows.contains(&surface)*/ => {
-                let position = LogicalPosition::new(x, y);
-                sink(event(
-                    WindowEvent::Touch(crate::event::Touch {
-                        device_id,
-                        phase: TouchPhase::Started,
-                        location: position.to_physical(get_surface_scale_factor(&surface) as f64),
-                        force: None, // TODO
-                        id: id as u64,
-                    }),
-                    surface.id(),
-                ));
-                self.push(TouchPoint{
-                    surface,
-                    position,
-                    id,
-                });
+            Down {surface, id, x, y, ..} /*if windows.contains(&surface)*/ => {
+                let point = TouchPoint{surface, position: LogicalPosition::new(x, y), id};
+                sink(TouchPhase::Started, point);
+                self.push(point);
             }
-            Event::Up { id, .. } if let Some(point) = self.remove_item(id) => {
-                sink(event(
-                    WindowEvent::Touch(crate::event::Touch {
-                        device_id,
-                        phase: TouchPhase::Ended,
-                        location: point.position.to_physical(get_surface_scale_factor(&point.surface) as f64),
-                        force: None, // TODO
-                        id: id as u64,
-                    }),
-                    &point.surface,
-                ));
+            Up { id, .. } => if let Some(point) = self.remove_item(id) /*=>*/ {
+                sink(TouchPhase::Ended, point);
             }
-            Event::Motion { id, x, y, .. } if let Some(point) = self.iter_mut().find(id) => {
+            Motion { id, x, y, .. } => if let Some(point) = self.iter_mut().find(id) /*=>*/ {
                 point.position = LogicalPosition::new(x, y);
-                sink(event(
-                    WindowEvent::Touch(crate::event::Touch {
-                        device_id,
-                        phase: TouchPhase::Moved,
-                        location: point.position.to_physical(get_surface_scale_factor(&point.surface) as f64),
-                        force: None, // TODO
-                        id: id as u64,
-                    }),
-                    &point.surface,
-                ));
+                sink(TouchPhase::Moved, point);
             }
-            Event::Frame => (),
-            Event::Cancel => {
+            Frame => (),
+            Cancel => {
                 for point in self.drain(..) {
-                    sink(event(
-                        WindowEvent::Touch(crate::event::Touch {
-                            device_id,
-                            phase: TouchPhase::Cancelled,
-                            location: point.position.to_physical(get_surface_scale_factor(&point.surface) as f64),
-                            force: None, // TODO
-                            id: point.id as u64,
-                        }),
-                        &point.surface,
-                    ));
+                    sink(TouchPhase::Cancelled, point);
                 }
             }
             _ => println!("Unexpected touch state"),

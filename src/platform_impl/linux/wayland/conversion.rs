@@ -1,6 +1,5 @@
-use smithay_client_toolkit::seat::keyboard::{self, Event::Key};
-use crate::event::{VirtualKeyCode, ModifiersState};
-
+use smithay_client_toolkit::seat::keyboard;
+use crate::event::ModifiersState;
 pub(crate) fn modifiers(mods: keyboard::ModifiersState) -> ModifiersState {
     let mut m = ModifiersState::empty();
     m.set(ModifiersState::SHIFT, mods.shift);
@@ -10,56 +9,59 @@ pub(crate) fn modifiers(mods: keyboard::ModifiersState) -> ModifiersState {
     m
 }
 
+use crate::window::CursorIcon;
 fn cursor(cursor: CursorIcon) -> &'static str {
+    use CursorIcon::*;
     match cursor {
-        CursorIcon::Alias => "link",
-        CursorIcon::Arrow => "arrow",
-        CursorIcon::Cell => "plus",
-        CursorIcon::Copy => "copy",
-        CursorIcon::Crosshair => "crosshair",
-        CursorIcon::Default => "left_ptr",
-        CursorIcon::Hand => "hand",
-        CursorIcon::Help => "question_arrow",
-        CursorIcon::Move => "move",
-        CursorIcon::Grab => "grab",
-        CursorIcon::Grabbing => "grabbing",
-        CursorIcon::Progress => "progress",
-        CursorIcon::AllScroll => "all-scroll",
-        CursorIcon::ContextMenu => "context-menu",
+        Alias => "link",
+        Arrow => "arrow",
+        Cell => "plus",
+        Copy => "copy",
+        Crosshair => "crosshair",
+        Default => "left_ptr",
+        Hand => "hand",
+        Help => "question_arrow",
+        Move => "move",
+        Grab => "grab",
+        Grabbing => "grabbing",
+        Progress => "progress",
+        AllScroll => "all-scroll",
+        ContextMenu => "context-menu",
 
-        CursorIcon::NoDrop => "no-drop",
-        CursorIcon::NotAllowed => "crossed_circle",
+        NoDrop => "no-drop",
+        NotAllowed => "crossed_circle",
 
         // Resize cursors
-        CursorIcon::EResize => "right_side",
-        CursorIcon::NResize => "top_side",
-        CursorIcon::NeResize => "top_right_corner",
-        CursorIcon::NwResize => "top_left_corner",
-        CursorIcon::SResize => "bottom_side",
-        CursorIcon::SeResize => "bottom_right_corner",
-        CursorIcon::SwResize => "bottom_left_corner",
-        CursorIcon::WResize => "left_side",
-        CursorIcon::EwResize => "h_double_arrow",
-        CursorIcon::NsResize => "v_double_arrow",
-        CursorIcon::NwseResize => "bd_double_arrow",
-        CursorIcon::NeswResize => "fd_double_arrow",
-        CursorIcon::ColResize => "h_double_arrow",
-        CursorIcon::RowResize => "v_double_arrow",
+        EResize => "right_side",
+        NResize => "top_side",
+        NeResize => "top_right_corner",
+        NwResize => "top_left_corner",
+        SResize => "bottom_side",
+        SeResize => "bottom_right_corner",
+        SwResize => "bottom_left_corner",
+        WResize => "left_side",
+        EwResize => "h_double_arrow",
+        NsResize => "v_double_arrow",
+        NwseResize => "bd_double_arrow",
+        NeswResize => "fd_double_arrow",
+        ColResize => "h_double_arrow",
+        RowResize => "v_double_arrow",
 
-        CursorIcon::Text => "text",
-        CursorIcon::VerticalText => "vertical-text",
+        Text => "text",
+        VerticalText => "vertical-text",
 
-        CursorIcon::Wait => "watch",
+        Wait => "watch",
 
-        CursorIcon::ZoomIn => "zoom-in",
-        CursorIcon::ZoomOut => "zoom-out",
+        ZoomIn => "zoom-in",
+        ZoomOut => "zoom-out",
     }
 }
 
-pub fn key(key : Key) -> Option<VirtualKeyCode> {
+use {keyboard::Event, crate::event::VirtualKeyCode};
+pub fn key(key : Event/*::Key*/) -> Option<VirtualKeyCode> { if let Event::Key{rawkey, keysym,..} = key { //#2593
     use {keyboard::keysyms::*, VirtualKeyCode::*};
     #[allow(non_upper_case_globals)]
-    match key.rawkey {
+    match rawkey {
         1 => Some(Escape),
         2 => Some(Key1),
         3 => Some(Key2),
@@ -71,7 +73,7 @@ pub fn key(key : Key) -> Option<VirtualKeyCode> {
         9 => Some(Key8),
         10 => Some(Key9),
         11 => Some(Key0),
-        _ => match key.keysym {
+        _ => match keysym {
             // letters
             XKB_KEY_A | XKB_KEY_a => Some(A),
             XKB_KEY_B | XKB_KEY_b => Some(B),
@@ -237,4 +239,4 @@ pub fn key(key : Key) -> Option<VirtualKeyCode> {
             _ => None,
         }
     }
-}
+}}

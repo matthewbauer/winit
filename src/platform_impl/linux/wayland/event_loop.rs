@@ -1,49 +1,26 @@
-use std::{
-    cell::RefCell,
-    collections::VecDeque,
-    fmt,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::{collections::VecDeque, fmt, sync::{Arc, Mutex}, time::Instant};
 use smithay_client_toolkit::{
     reexports::calloop::{self, channel::{channel as unbounded, Sender, Channel as Receiver}},
-    default_environment,
     environment::{Environment, SimpleGlobal},
     init_default_environment,
     reexports::{
-        client::{
-            ConnectError, Display,
-            EventQueue, Attached,
-            protocol::{
-                wl_output,
-                wl_seat::WlSeat,
-                wl_surface::WlSurface,
-            },
-        },
+        client::{ConnectError, Display, protocol::{wl_output, wl_surface::WlSurface}},
         protocols::unstable::{
             pointer_constraints::v1::client::zwp_pointer_constraints_v1::{ZwpPointerConstraintsV1, Lifetime},
             relative_pointer::v1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
         },
     },
     output::with_output_info,
-    window::{Window, ConceptFrame, Decorations},
+    window::{Window as SCTKWindow, ConceptFrame, Decorations},
 };
 use crate::{
-    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
-    event::{
-        DeviceEvent, DeviceId as RootDeviceId, Event as Item, ModifiersState, StartCause, WindowEvent as Event,
-    },
-    event_loop::{ControlFlow, EventLoopClosed, EventLoopWindowTarget},
+    dpi::{PhysicalPosition, PhysicalSize},
+    event::{DeviceEvent, StartCause, WindowEvent as Event},
+    event_loop::{ControlFlow, EventLoopClosed},
     monitor::{MonitorHandle as RootMonitorHandle, VideoMode as RootVideoMode},
-    platform_impl::platform::{
-        DeviceId as PlatformDeviceId, MonitorHandle as PlatformMonitorHandle,
-        VideoMode as PlatformVideoMode, WindowId,
-    },
+    platform_impl::platform::{DeviceId as PlatformDeviceId, MonitorHandle as PlatformMonitorHandle, VideoMode as PlatformVideoMode},
 };
-use super::{
-    window::{Window as WindowState, DecorationsAction},
-    DeviceId, WindowId as WaylandWindowId,
-};
+use super::{Update, Sink,  window::{event, WindowState}};
 
 default_environment!(Env, desktop,
     fields = [
@@ -59,6 +36,7 @@ default_environment!(Env, desktop,
 pub struct Window {
     surface: WlSurface,
     size: (u32, u32), scale_factor: u32,
+    fullscreen: bool
 }
 
 /// Mutable state, time shared by handlers on main thread
@@ -67,13 +45,13 @@ pub struct State {
     pub env: Environment<Env>,
     keyboard: super::keyboard::Keyboard,
     pointers: Vec<super::pointer::Pointer>,
-    sctk_windows: Vec<Window<ConceptFrame>>,
+    sctk_windows: Vec<SCTKWindow<ConceptFrame>>,
     windows: Arc<Mutex<Vec<Window>>>,
     update: Sender<WindowState>,
 }
 
 // pub impl Deref<..> EventLoop, Window::new(..)
-//type EventLoopWindowTarget<T> = State; // +Marker?
+pub type EventLoopWindowTarget<T> = State; // +Marker?
 
 /*impl<T> EventLoopWindowTarget<T> {
     pub fn display(&self) -> &Display {
@@ -82,25 +60,26 @@ pub struct State {
 }*/
 
 pub struct EventLoop<T: 'static> {
-    state: crate::EventLoopWindowTarget<T>, //state: State,
+    state: crate::event_loop::EventLoopWindowTarget<T>, //state: State,
     pub channel: (Sender<T>, Receiver<T>), // EventProxy
+}
+
+pub(crate) struct DispatchData<'t, S> {
+    update: Update<S>,
+    state: &'t mut State,
 }
 
 impl<T> EventLoop<T> {
     // crate::EventLoop::Deref
-    pub fn window_target(&self) -> &crate::EventLoopWindowTarget<T> {
+    pub fn window_target(&self) -> &crate::event_loop::EventLoopWindowTarget<T> {
         &self.state
     }
 
     pub fn new() -> Result<Self<T>, ConnectError> {
-        struct DispatchData<'t, T> {
-            frame: Frame<S>,
-            state: &'t mut State,
-        }
         let mut event_loop = calloop::EventLoop::<DispatchData<T>>::new().unwrap();
 
         let (user, receiver) = unbounded();
-        event_loop.insert_source(receiver, |item, _, state| {
+        event_loop.insert_source(receiver, |item, _, data| {
             let DispatchData{update:Update{sink, .. }} = data.get().unwrap();
             sink(Event::UserEvent(item));
         });
@@ -149,10 +128,10 @@ impl<T> EventLoop<T> {
                     if let Some(manager) = relative_pointer_manager {
                         manager.get_relative_pointer(pointer).quick_assign(move |_, event, data| match event {
                             Event::RelativeMotion { dx, dy, .. } => {
-                                let Context{frame: Frame{sink}} = data.get().unwrap();
+                                let DispatchData{update: Update{sink}} = data.get().unwrap();
                                 sink(Event::DeviceEvent {
                                     event: DeviceEvent::MouseMotion { delta: (dx, dy) },
-                                    device_id: RootDeviceId(PlatformDeviceId::Wayland(DeviceId)),
+                                    device_id: crate::event::DeviceId(PlatformDeviceId::Wayland(super::DeviceId)),
                                 });
                             }
                             _ => unreachable!(),
@@ -186,24 +165,29 @@ impl<T> EventLoop<T> {
         // Sync window state
         let (update, receiver) = unbounded();
         event_loop.insert_source(receiver, |state@WindowState{surface}, _, data| {
-            let DispatchData{State{windows, sctk_windows, redraw_events}} = data;
+            let DispatchData{update:Update{sink}, state:State{pointers, windows, sctk_windows, redraw_events}} = data;
             let window = windows.find(surface).unwrap();
-            let sctk_window = sctk_windows.find(id).unwrap();
+            let sctk_window = sctk_windows.find(surface).unwrap();
+
             if window.size != state.size || window.scale_factor != state.scale_factor {
                 redraw_events.push(sink(event(Event::RedrawRequested, window.surface)));
                 {let (w, h) = state.size; sctk_window.resize(w, h);}
                 sctk_window.refresh();
             }
+
             if state.decorate { sctk_window.set_decorate(Decorations::FollowServer); }
             else { sctk_window.set_decorate(Decorations::None); }
+
             if let Some(pointer_constraints) = env.get_global() {
-                state.pointer_constraints = self.pointers.iter().filter(|_| state.grab_cursor).map(
+                state.pointer_constraints = pointers.iter().filter(|_| state.grab_cursor).map(
                     |pointer| pointer_constraints.lock_pointer(surface, pointer, None, Lifetime::Persistent.to_raw())
                 ).collect();
             }
-            } else {
-                sink(Event{ window_id: wid(&window.surface), event: Event::Destroyed });
-                if let Some(window) = state.windows.remove_item(id) { window.surface().destroy(); }
+
+            if state.drop {
+                surface.destroy();
+                state.windows.remove_item(surface);
+                sink(event(Event::Destroyed, surface));
             }
         });
 
@@ -212,14 +196,12 @@ impl<T> EventLoop<T> {
                 display,
                 env,
                 update,
-                sink,
             },
-            waker
         })
     }
 }
 
-#[derive(Clone)] struct EventLoopProxy<T>(Sender<T>);
+#[derive(Clone)] pub struct EventLoopProxy<T>(Sender<T>);
 
 impl<T: 'static> EventLoopProxy<T> {
     pub fn send_event(&self, event: T) -> Result<(), EventLoopClosed<T>> {
@@ -242,31 +224,32 @@ impl<T> EventLoop<T> {
     }
 
     pub fn run_return<S:Sink<T>>(&mut self, mut sink: S) {
+        let Self{event_loop, state} = self;
         let sink = |event, state| {
             sink(
                 event,
-                &mut crate::EventLoopWindowTarget{p: crate::platform_impl::EventLoopWindowTarget::Wayland(state)},
-                if state.control_flow == ControlFlow::Exit { &mut ControlFlow::Exit } else { &mut control_flow }, // sticky exit
+                &mut crate::event_loop::EventLoopWindowTarget{p: crate::platform_impl::EventLoopWindowTarget::Wayland(state)},
+                if state.control_flow == ControlFlow::Exit { &mut ControlFlow::Exit } else { &mut state.control_flow }, // sticky exit
             )
         };
 
-        sink(Event::NewEvents(StartCause::Init), state);
+        sink(Event::NewEvents(StartCause::Init), self.state);
 
         loop {
-            match control_flow {
+            match state.control_flow {
                 ControlFlow::Exit => break,
                 ControlFlow::Poll => {
-                    event_loop.dispatch(std::time::Duration(0,0), &mut DispatchData{frame: Frame{sink}, state: &mut state});
+                    event_loop.dispatch(std::time::Duration::new(0,0), &mut DispatchData{update: Update{sink}, state: &mut state});
                     sink(Event::NewEvents(StartCause::Poll), state);
                 }
                 ControlFlow::Wait => {
-                    event_loop.dispatch(None, &mut DispatchData{frame: Frame{sink}, state: &mut state});
+                    event_loop.dispatch(None, &mut DispatchData{update: Update{sink}, state: &mut state});
                     sink(Event::NewEvents(StartCause::WaitCancelled{start: Instant::now(), requested_resume: None}), state);
                 }
                 ControlFlow::WaitUntil(deadline) => {
                     let start = Instant::now();
                     let duration = deadline.saturating_duration_since(start);
-                    event_loop.dispatch(Some(duration), &mut DispatchData{frame: Frame{sink}, state: &mut state});
+                    event_loop.dispatch(Some(duration), &mut DispatchData{update: Update{sink}, state: &mut state});
 
                     let now = Instant::now();
                     if now < deadline {
@@ -278,7 +261,7 @@ impl<T> EventLoop<T> {
                             state
                         );
                     } else {
-                        callback(
+                        sink(
                             Event::NewEvents(StartCause::ResumeTimeReached {
                                 start,
                                 requested_resume: deadline,
