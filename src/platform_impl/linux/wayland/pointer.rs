@@ -1,18 +1,12 @@
 use smithay_client_toolkit::{
-    reexports::{
-        client::protocol::{wl_pointer::{self, ButtonState}, wl_surface::WlSurface},
-        protocols::unstable::relative_pointer::v1::client::{
-            zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
-            zwp_relative_pointer_v1::{self, ZwpRelativePointerV1},
-        },
-    },
+    reexports::client::protocol::{wl_pointer::{self, ButtonState}, wl_surface::WlSurface},
     get_surface_scale_factor,
     seat::pointer::ThemedPointer,
     window
 };
 type SCTKWindow = window::Window<window::ConceptFrame>;
 use crate::{dpi::LogicalPosition, event::{ElementState, MouseButton, WindowEvent as Event, TouchPhase, MouseScrollDelta}};
-use super::{Update, DeviceId, window::WindowState};
+use super::{Update, window::WindowState};
 
 // Track focus and reconstruct scroll events
 #[derive(Default)] pub struct Pointer {
@@ -23,7 +17,7 @@ use super::{Update, DeviceId, window::WindowState};
 }
 
 impl Pointer {
-    fn handle(&mut self, event : Event, pointer: ThemedPointer, Update{sink}: &mut Update, windows: &[WindowState], current_cursor: &'static str) {
+    fn handle<T>(&mut self, event : Event, pointer: ThemedPointer, Update{sink}: &mut Update<T>, windows: &[WindowState], current_cursor: &'static str) {
         let Self{focus, axis_buffer, axis_discrete_buffer, phase} = self;
         let event = |e,s| sink(event(e), s);
         let device_id = crate::event::DeviceId(super::super::DeviceId::Wayland(super::DeviceId));

@@ -2,7 +2,7 @@ use std::{collections::VecDeque, fmt, sync::{Arc, Mutex}, time::Instant};
 use smithay_client_toolkit::{
     reexports::calloop::{self, channel::{channel as unbounded, Sender, Channel as Receiver}},
     environment::{Environment, SimpleGlobal},
-    init_default_environment,
+    default_environment,
     reexports::{
         client::{ConnectError, Display, protocol::{wl_output, wl_surface::WlSurface}},
         protocols::unstable::{
@@ -22,7 +22,7 @@ use crate::{
 };
 use super::{Update, Sink,  window::{event, WindowState}};
 
-default_environment!(Env, desktop,
+default_environment!{Env, desktop,
     fields = [
         relative_pointer_manager: SimpleGlobal<ZwpRelativePointerManagerV1>,
         pointer_constraints: SimpleGlobal<ZwpPointerConstraintsV1>
@@ -31,7 +31,7 @@ default_environment!(Env, desktop,
         ZwpRelativePointerManagerV1 => relative_pointer_manager,
         ZwpPointerConstraintsV1 => pointer_constraints
     ]
-);
+}
 
 pub struct Window {
     surface: WlSurface,
@@ -51,7 +51,10 @@ pub struct State {
 }
 
 // pub impl Deref<..> EventLoop, Window::new(..)
-pub type EventLoopWindowTarget<T> = State; // +Marker?
+pub struct EventLoopWindowTarget<T> {
+    state: State,
+    _marker: std::marker::PhantomData<T> // Why is winit::EventLoopWindowTarget generic ?
+}
 
 /*impl<T> EventLoopWindowTarget<T> {
     pub fn display(&self) -> &Display {
@@ -65,7 +68,7 @@ pub struct EventLoop<T: 'static> {
 }
 
 pub(crate) struct DispatchData<'t, S> {
-    update: Update<S>,
+    update: Update<'t, S>,
     state: &'t mut State,
 }
 
@@ -75,7 +78,7 @@ impl<T> EventLoop<T> {
         &self.state
     }
 
-    pub fn new() -> Result<Self<T>, ConnectError> {
+    pub fn new() -> Result<Self, ConnectError> {
         let mut event_loop = calloop::EventLoop::<DispatchData<T>>::new().unwrap();
 
         let (user, receiver) = unbounded();
@@ -84,8 +87,7 @@ impl<T> EventLoop<T> {
             sink(Event::UserEvent(item));
         });
 
-        use smithay_client_toolkit::{default_environment, init_default_environment, WaylandSource, seat};
-        default_environment!(Env, desktop);
+        use smithay_client_toolkit::{init_default_environment, WaylandSource, seat};
         let (env, display, queue) = init_default_environment!(
             Env,
             desktop,

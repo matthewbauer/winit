@@ -1,8 +1,4 @@
-use std::{
-    collections::VecDeque,
-    mem::replace,
-    sync::{Arc, Mutex, Weak},
-};
+use std::{collections::VecDeque, sync::{Arc, Mutex}};
 use raw_window_handle::unix::WaylandHandle;
 use smithay_client_toolkit::{
     environment::Environment,
@@ -12,10 +8,7 @@ use smithay_client_toolkit::{
     },
     get_surface_outputs,
     get_surface_scale_factor,
-    window::{
-        ConceptFrame, Decorations, Event as WEvent, State as WState,
-        Window as SCTKWindow,
-    },
+    window::{ConceptFrame, Decorations, State as WState},
 };
 use crate::{
     event::Event,
@@ -35,7 +28,7 @@ pub fn window_id(surface: &WlSurface) {
     crate::window::WindowId(super::super::WindowId::Wayland(surface.id()))
 }
 
-pub fn event(event: crate::event::WindowEvent<'static>, surface: &WlSurface) -> crate::event::Event {
+pub fn event<'t, T>(event: crate::event::WindowEvent<'t>, surface: &'t WlSurface) -> crate::event::Event<'t, T> {
     crate::event::Event::WindowEvent{event, window_id: window_id(surface) }
 }
 

@@ -1,6 +1,6 @@
-use std::{rc::Rc, cell::Cell, time::{Instant, Duration}};
+use std::{rc::Rc, cell::Cell};
 pub use smithay_client_toolkit::seat::keyboard::{Event, KeyState};
-use {super::Update, crate::{event::{ElementState, ModifiersState, WindowEvent, KeyboardInput}}, super::conversion};
+use {super::Update, crate::{event::{ModifiersState, KeyboardInput}}, super::conversion};
 
 // Track modifiers and key repetition
 #[derive(Default)] pub struct Keyboard {
