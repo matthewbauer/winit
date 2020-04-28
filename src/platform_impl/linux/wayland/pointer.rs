@@ -1,3 +1,4 @@
+//use std::ops::Deref;
 use smithay_client_toolkit::{
     reexports::client::protocol::{wl_pointer::{self, ButtonState}, wl_surface::WlSurface},
     get_surface_scale_factor,
@@ -6,7 +7,7 @@ use smithay_client_toolkit::{
 };
 type SCTKWindow = window::Window<window::ConceptFrame>;
 use crate::{dpi::LogicalPosition, event::{ElementState, MouseButton, WindowEvent as Event, TouchPhase, MouseScrollDelta}};
-use super::{Update, window::WindowState};
+use super::Update;
 
 // Track focus and reconstruct scroll events
 #[derive(Default)] pub struct Pointer {
@@ -17,7 +18,8 @@ use super::{Update, window::WindowState};
 }
 
 impl Pointer {
-    fn handle<T>(&mut self, event : Event, pointer: ThemedPointer, Update{sink}: &mut Update<T>, windows: &[WindowState], current_cursor: &'static str) {
+    pub fn handle<T,F:window::Frame>(&mut self, event : wl_pointer::Event, pointer: ThemedPointer, Update{sink}: &mut Update<T>, //windows: &[impl Deref<Target=WlSurface>],
+    windows: &[window::Window<F>], current_cursor: &'static str) {
         let Self{focus, axis_buffer, axis_discrete_buffer, phase} = self;
         let event = |e,s| sink(event(e), s);
         let device_id = crate::event::DeviceId(super::super::DeviceId::Wayland(super::DeviceId));

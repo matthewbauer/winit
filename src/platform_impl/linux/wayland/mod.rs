@@ -5,11 +5,11 @@ pub use self::{
     window::WindowHandle as Window,
 };
 
-trait Sink<T> = FnMut(crate::event::Event<T>, &crate::event_loop::EventLoopWindowTarget<T>, &mut crate::event_loop::ControlFlow)+'static;
+trait Sink<T> = FnMut(crate::event::Event<T>, &crate::event_loop::EventLoopWindowTarget<T>, &mut crate::event_loop::ControlFlow);
 
 // Application state update
-struct Update<'t, S> {
-    sink: &'t S,
+struct Update<'t, T:'static> {
+    sink: &'t mut dyn Sink<T>,
 }
 
 mod event_loop;

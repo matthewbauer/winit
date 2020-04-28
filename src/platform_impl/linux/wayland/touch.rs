@@ -12,10 +12,10 @@ impl std::cmp::PartialEq for TouchPoint {
 }
 
 // Track touch points
-pub struct Touch(Vec<TouchPoint>);
+#[derive(Default)] pub struct Touch(Vec<TouchPoint>);
 
 impl Touch {
-    fn handle<T>(&mut self, sink: impl Sink<T>, /*windows: &[super::window::WindowState],*/ event: Event) {
+    pub fn handle<T>(&mut self, sink: &mut dyn Sink<T>, /*windows: &[super::window::WindowState],*/ event: wl_touch::Event) {
         let device_id = crate::event::DeviceId(super::super::DeviceId::Wayland(super::DeviceId));
         let sink = |phase,TouchPoint{surface, id, position}| {
             let e = Touch {device_id, phase, location: position.to_physical(get_surface_scale_factor(&surface) as f64), force: None/*TODO*/, id: id as u64};

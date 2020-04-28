@@ -7,18 +7,21 @@ use smithay_client_toolkit::{
         client::{ConnectError, Display, protocol::{wl_output, wl_surface::WlSurface}},
         protocols::unstable::{
             pointer_constraints::v1::client::zwp_pointer_constraints_v1::{ZwpPointerConstraintsV1, Lifetime},
-            relative_pointer::v1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+            relative_pointer::v1::client::{
+                zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+                zwp_relative_pointer_v1
+            }
         },
     },
     output::with_output_info,
+    seat::pointer::ThemedPointer,
     window::{Window as SCTKWindow, ConceptFrame, Decorations},
 };
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::{DeviceEvent, StartCause, WindowEvent as Event},
     event_loop::{ControlFlow, EventLoopClosed},
-    monitor::{MonitorHandle as RootMonitorHandle, VideoMode as RootVideoMode},
-    platform_impl::platform::{DeviceId as PlatformDeviceId, MonitorHandle as PlatformMonitorHandle, VideoMode as PlatformVideoMode},
+    platform_impl::platform,
 };
 use super::{Update, Sink,  window::{event, WindowState}};
 
@@ -44,16 +47,18 @@ pub struct State {
     pub display: Display,
     pub env: Environment<Env>,
     keyboard: super::keyboard::Keyboard,
-    pointers: Vec<super::pointer::Pointer>,
+    pointers: Vec<ThemedPointer>,
+    current_cursor: &'static str,
     sctk_windows: Vec<SCTKWindow<ConceptFrame>>,
     windows: Arc<Mutex<Vec<Window>>>,
     update: Sender<WindowState>,
+    control_flow: ControlFlow, // for EventLoopWindowTarget
 }
 
 // pub impl Deref<..> EventLoop, Window::new(..)
 pub struct EventLoopWindowTarget<T> {
-    state: State,
-    _marker: std::marker::PhantomData<T> // Why is winit::EventLoopWindowTarget generic ?
+    state: &'static mut State,
+    _marker: std::marker::PhantomData<T> // Mark whole backend with custom user event type...
 }
 
 /*impl<T> EventLoopWindowTarget<T> {
@@ -65,27 +70,37 @@ pub struct EventLoopWindowTarget<T> {
 pub struct EventLoop<T: 'static> {
     state: crate::event_loop::EventLoopWindowTarget<T>, //state: State,
     pub channel: (Sender<T>, Receiver<T>), // EventProxy
+    window_target: Option<crate::event_loop::EventLoopWindowTarget<T>>, // crate::EventLoop::Deref -> &EventLoopWindowTarget
 }
 
-pub(crate) struct DispatchData<'t, S> {
-    update: Update<'t, S>,
+pub(crate) struct DispatchData<'t, T:'static> {
+    update: Update<'t, T>,
     state: &'t mut State,
 }
 
-impl<T> EventLoop<T> {
-    // crate::EventLoop::Deref
-    pub fn window_target(&self) -> &crate::event_loop::EventLoopWindowTarget<T> {
-        &self.state
-    }
+fn sink<T>(sink: &dyn Sink<T>, state: &'static mut State, event: crate::event::Event<T>) {
+    sink(
+        event,
+        &mut crate::event_loop::EventLoopWindowTarget{
+            p: crate::platform_impl::EventLoopWindowTarget::Wayland(EventLoopWindowTarget{state, _marker: Default::default() } ),
+            _marker: Default::default()
+        },
+        if state.control_flow == ControlFlow::Exit { &mut ControlFlow::Exit } else { &mut state.control_flow }, // sticky exit
+    )
+}
 
+impl<T> DispatchData<'static, T> {
+    fn sink(&'static self, event: crate::event::Event<T>) { sink(self.update.sink, self.state, event) }
+}
+
+impl<T> EventLoop<T> {
     pub fn new() -> Result<Self, ConnectError> {
         let mut event_loop = calloop::EventLoop::<DispatchData<T>>::new().unwrap();
 
         let (user, receiver) = unbounded();
-        event_loop.insert_source(receiver, |item, _, data| {
-            let DispatchData{update:Update{sink, .. }} = data.get().unwrap();
-            sink(Event::UserEvent(item));
-        });
+        /*event_loop.handle().insert_source(receiver, |item:T, _, data:&mut DispatchData<T>| { // calloop::sources::channel::Event<_> ? should be T
+            data.sink(crate::event::Event::UserEvent(item));
+        });*/
 
         use smithay_client_toolkit::{init_default_environment, WaylandSource, seat};
         let (env, display, queue) = init_default_environment!(
@@ -101,9 +116,11 @@ impl<T> EventLoop<T> {
             .unwrap();
 
         let seat_handler = { // for a simple setup
+            let loop_handle = event_loop.handle();
+
             use seat::{
                 pointer::{ThemeManager, ThemeSpec},
-                keyboard::{map_keyboard, RepeatKind},
+                keyboard::{map_keyboard_repeat, RepeatKind},
             };
 
             let theme_manager = ThemeManager::init(
@@ -115,26 +132,25 @@ impl<T> EventLoop<T> {
             let relative_pointer_manager = env.get_global::<ZwpRelativePointerManagerV1>();
 
             env.listen_for_seats(move |seat, seat_data, mut data| {
-                let DispatchData{state:State{pointers, .. }} = data.get().unwrap();
+                let DispatchData{state:State{pointers, .. }, ..} = data.get().unwrap();
                 if seat_data.has_pointer {
                     let pointer = theme_manager.theme_pointer_with_impl(&seat,
                         {
                             let pointer = super::pointer::Pointer::default(); // Track focus and reconstruct scroll events
                             move/*pointer*/ |event, themed_pointer, data| {
-                                let DispatchData{frame, state:State{ window, current_cursor, .. }} = data.get().unwrap();
-                                pointer.handle(event, themed_pointer, frame, window, current_cursor);
+                                let DispatchData{update, state:State{sctk_windows, current_cursor, .. }} = data.get().unwrap();
+                                pointer.handle(event, themed_pointer, update, sctk_windows, current_cursor);
                             }
                         }
-                    ).unwrap();
+                    );
 
                     if let Some(manager) = relative_pointer_manager {
-                        manager.get_relative_pointer(pointer).quick_assign(move |_, event, data| match event {
-                            Event::RelativeMotion { dx, dy, .. } => {
-                                let DispatchData{update: Update{sink}} = data.get().unwrap();
-                                sink(Event::DeviceEvent {
-                                    event: DeviceEvent::MouseMotion { delta: (dx, dy) },
-                                    device_id: crate::event::DeviceId(PlatformDeviceId::Wayland(super::DeviceId)),
-                                });
+                        use zwp_relative_pointer_v1::Event::*;
+                        manager.get_relative_pointer(&pointer).quick_assign(move |_, event, data| match event {
+                            RelativeMotion { dx, dy, .. } => {
+                                let data @ DispatchData{update: Update{sink}, ..} = data.get().unwrap();
+                                let device_id = crate::event::DeviceId(super::super::DeviceId::Wayland(super::DeviceId));
+                                data.sink(crate::event::Event::DeviceEvent{event: DeviceEvent::MouseMotion { delta: (dx, dy) }, device_id});
                             }
                             _ => unreachable!(),
                         });
@@ -144,10 +160,10 @@ impl<T> EventLoop<T> {
                 }
 
                 if seat_data.has_keyboard {
-                    let _ = map_keyboard(&seat, None, RepeatKind::System,
+                    let _ = map_keyboard_repeat(loop_handle, &seat, None, RepeatKind::System,
                         |event, _, data| {
-                            let DispatchData{frame, state} = data.get().unwrap();
-                            state.keyboard.handle(event, frame);
+                            let DispatchData{update, state} = data.get().unwrap();
+                            state.keyboard.handle(update, event, false);
                         }
                     ).unwrap();
                 }
@@ -156,17 +172,17 @@ impl<T> EventLoop<T> {
                     seat.get_touch().quick_assign({
                         let touch = super::touch::Touch::default(); // Track touch points
                         move |_, event, data| {
-                            let DispatchData{frame, ..} = data.get().unwrap();
-                            touch.handle(event, frame);
+                            let DispatchData{update: Update{sink}, ..} = data.get().unwrap();
+                            touch.handle(sink, event);
                         }
-                    }).unwrap();
+                    });
                 }
             });
         };
 
         // Sync window state
         let (update, receiver) = unbounded();
-        event_loop.insert_source(receiver, |state@WindowState{surface}, _, data| {
+        event_loop.handle().insert_source(receiver, |state@WindowState{surface}, _, data| {
             let DispatchData{update:Update{sink}, state:State{pointers, windows, sctk_windows, redraw_events}} = data;
             let window = windows.find(surface).unwrap();
             let sctk_window = sctk_windows.find(surface).unwrap();
@@ -200,6 +216,10 @@ impl<T> EventLoop<T> {
                 update,
             },
         })
+    }
+    // required by linux/mod.rs for crate::EventLoop::Deref
+    pub fn window_target(&self) -> &crate::event_loop::EventLoopWindowTarget<T> {
+        &self.window_target.get_or_insert( crate::event_loop::EventLoopWindowTarget{p: crate::platform_impl::EventLoopWindowTarget::Wayland(&self.state)} )
     }
 }
 
@@ -319,9 +339,9 @@ impl VideoMode {
     }
 
     #[inline]
-    pub fn monitor(&self) -> RootMonitorHandle {
-        RootMonitorHandle {
-            inner: PlatformMonitorHandle::Wayland(self.monitor.clone()),
+    pub fn monitor(&self) -> crate::monitor::MonitorHandle {
+        crate::monitor::MonitorHandle {
+            inner: platform::MonitorHandle::Wayland(self.monitor.clone()),
         }
     }
 }
@@ -413,14 +433,14 @@ impl MonitorHandle {
     }
 
     #[inline]
-    pub fn video_modes(&self) -> impl Iterator<Item = RootVideoMode> {
+    pub fn video_modes(&self) -> impl Iterator<Item = crate::monitor::VideoMode> {
         let monitor = self.clone();
 
         with_output_info(&self.0, |info| info.modes.clone())
             .unwrap_or(vec![])
             .into_iter()
-            .map(move |x| RootVideoMode {
-                video_mode: PlatformVideoMode::Wayland(VideoMode {
+            .map(move |x| crate::monitor::VideoMode {
+                video_mode: platform::VideoMode::Wayland(VideoMode {
                     size: (x.dimensions.0 as u32, x.dimensions.1 as u32),
                     refresh_rate: (x.refresh_rate as f32 / 1000.0).round() as u16,
                     bit_depth: 32,

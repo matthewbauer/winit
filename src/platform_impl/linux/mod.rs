@@ -594,7 +594,7 @@ impl<T: 'static> Clone for EventLoopProxy<T> {
         match self {
             #[cfg(feature = "x11")]
             EventLoopProxy::X(proxy) => EventLoopProxy::X(proxy.clone()),
-            EventLoopProxy::Wayland(proxy) => EventLoopProxy::Wayland(proxy.clone()),
+            EventLoopProxy::Wayland(proxy) => EventLoopProxy::Wayland(*proxy.clone()),
         }
     }
 }

@@ -9,7 +9,7 @@ use {super::Update, crate::{event::{ModifiersState, KeyboardInput}}, super::conv
 }
 
 impl Keyboard {
-    fn handle<T>(&mut self, Update{sink, ..}: &mut Update<T>, event: Event, is_synthetic: bool) {
+    pub fn handle<T>(&mut self, Update{sink, ..}: &mut Update<T>, event: Event, is_synthetic: bool) {
         let Self{modifiers, repeat} = self;
         let event = |e,s| sink(event(e), s);
         match event {
