@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, fmt, sync::{Arc, Mutex}, time::Instant};
+use std::{collections::VecDeque, fmt, sync::{Arc, Mutex, Weak}, time::Instant};
 use smithay_client_toolkit::{
     reexports::calloop::{self, channel::{channel as unbounded, Sender, Channel as Receiver}},
     environment::{Environment, SimpleGlobal},
@@ -6,7 +6,7 @@ use smithay_client_toolkit::{
     reexports::{
         client::{ConnectError, Display, protocol::{wl_output, wl_surface::WlSurface}},
         protocols::unstable::{
-            pointer_constraints::v1::client::zwp_pointer_constraints_v1::{ZwpPointerConstraintsV1, Lifetime},
+            pointer_constraints::v1::client::zwp_pointer_constraints_v1::{ZwpPointerConstraintsV1},
             relative_pointer::v1::client::{
                 zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
                 zwp_relative_pointer_v1
@@ -15,15 +15,15 @@ use smithay_client_toolkit::{
     },
     output::with_output_info,
     seat::pointer::ThemedPointer,
-    window::{Window as SCTKWindow, ConceptFrame, Decorations},
+    window::{Window as SCTKWindow, ConceptFrame},
 };
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize},
-    event::{DeviceEvent, StartCause, WindowEvent as Event},
+    event::{DeviceEvent, StartCause, Event},
     event_loop::{ControlFlow, EventLoopClosed},
     platform_impl::platform,
 };
-use super::{Update, Sink,  window::{event, WindowState}};
+use super::{Update, Sink,  window::WindowState};
 
 default_environment!{Env, desktop,
     fields = [
@@ -43,67 +43,44 @@ pub struct Window {
 }
 
 /// Mutable state, time shared by handlers on main thread
-pub struct State {
+pub struct State<T: 'static> {
     pub display: Display,
     pub env: Environment<Env>,
     keyboard: super::keyboard::Keyboard,
-    pointers: Vec<ThemedPointer>,
-    current_cursor: &'static str,
+    current_cursor: &'static str, // pointer::Enter
+    pointers: Vec<ThemedPointer>, // Window::set_pointer
     sctk_windows: Vec<SCTKWindow<ConceptFrame>>,
     windows: Arc<Mutex<Vec<Window>>>,
     update: Sender<WindowState>,
     control_flow: ControlFlow, // for EventLoopWindowTarget
+    redraw_events: Vec<Event<'static, T>>,
 }
 
 // pub impl Deref<..> EventLoop, Window::new(..)
-pub struct EventLoopWindowTarget<T> {
-    state: &'static mut State,
+/*pub struct EventLoopWindowTarget<T: 'static> {
+    state: Weak<State>, // Workaround 'static lifetime requirement for winit::EventLoopWindowTarget
+    //event_loop: &'static EventLoop<T>,
     _marker: std::marker::PhantomData<T> // Mark whole backend with custom user event type...
-}
-
+}*/
+pub type EventLoopWindowTarget<T: 'static> = Weak<State<T>>;
 /*impl<T> EventLoopWindowTarget<T> {
     pub fn display(&self) -> &Display {
         &*self.display
     }
 }*/
+//pub type EventLoopWindowTarget<T: 'static> = &'static EventLoop<T>;
 
 pub struct EventLoop<T: 'static> {
-    state: crate::event_loop::EventLoopWindowTarget<T>, //state: State,
-    pub channel: (Sender<T>, Receiver<T>), // EventProxy
+    event_loop: calloop::EventLoop<DispatchData<'static,T>>,
+    receiver: Receiver<WindowState>,
+    state: Arc<State<T>>, // Arc to workaround EventLoopWindowTarget lifetime requirement
+    pub user: (Sender<T>, Receiver<T>), // EventProxy
     window_target: Option<crate::event_loop::EventLoopWindowTarget<T>>, // crate::EventLoop::Deref -> &EventLoopWindowTarget
-}
-
-pub(crate) struct DispatchData<'t, T:'static> {
-    update: Update<'t, T>,
-    state: &'t mut State,
-}
-
-fn sink<T>(sink: &dyn Sink<T>, state: &'static mut State, event: crate::event::Event<T>) {
-    sink(
-        event,
-        &mut crate::event_loop::EventLoopWindowTarget{
-            p: crate::platform_impl::EventLoopWindowTarget::Wayland(EventLoopWindowTarget{state, _marker: Default::default() } ),
-            _marker: Default::default()
-        },
-        if state.control_flow == ControlFlow::Exit { &mut ControlFlow::Exit } else { &mut state.control_flow }, // sticky exit
-    )
-}
-
-impl<T> DispatchData<'static, T> {
-    fn sink(&'static self, event: crate::event::Event<T>) { sink(self.update.sink, self.state, event) }
 }
 
 impl<T> EventLoop<T> {
     pub fn new() -> Result<Self, ConnectError> {
-        let mut event_loop = calloop::EventLoop::<DispatchData<T>>::new().unwrap();
-
-        let (user, receiver) = unbounded();
-        /*event_loop.handle().insert_source(receiver, |item:T, _, data:&mut DispatchData<T>| { // calloop::sources::channel::Event<_> ? should be T
-            data.sink(crate::event::Event::UserEvent(item));
-        });*/
-
-        use smithay_client_toolkit::{init_default_environment, WaylandSource, seat};
-        let (env, display, queue) = init_default_environment!(
+        let (env, display, queue) = smithay_client_toolkit::init_default_environment!(
             Env,
             desktop,
             fields = [
@@ -111,35 +88,107 @@ impl<T> EventLoop<T> {
                 pointer_constraints: SimpleGlobal::new()
             ]
         )?;
-        WaylandSource::new(queue)
+
+        let mut event_loop = calloop::EventLoop::<DispatchData<T>>::new().unwrap();
+        smithay_client_toolkit::WaylandSource::new(queue) // Moves
             .quick_insert(event_loop.handle())
             .unwrap();
+
+        let (update, receiver) = unbounded();
+        Ok(Self{
+            event_loop, receiver,
+            state: Arc::new(State{
+                display, env,
+                keyboard: Default::default(),
+                current_cursor: "left_ptr",
+                pointers: Default::default(),
+                sctk_windows: Default::default(),
+                windows: Default::default(),
+                update,
+                control_flow: ControlFlow::Wait,
+                redraw_events: Default::default(),
+            }),
+            user: unbounded(),
+            window_target: None,
+        })
+    }
+}
+
+// required by linux/mod.rs for crate::EventLoop::Deref // need Arc to workaround lifetime req for EventLoopWindowTarget
+pub fn window_target<T>(state: &Arc<State<T>>) -> crate::event_loop::EventLoopWindowTarget<T> {
+    crate::event_loop::EventLoopWindowTarget{p: crate::platform_impl::EventLoopWindowTarget::Wayland(Arc::downgrade(&state)), _marker: Default::default()}
+}
+impl<T> EventLoop<T> {
+    pub fn window_target(&self) -> &crate::event_loop::EventLoopWindowTarget<T> { &self.window_target.get_or_insert(window_target(&self.state)) }
+}
+
+pub(crate) struct DispatchData<'t, T:'static> {
+    update: Update<'t, T>,
+    state: &'t mut Arc<State<T>>,
+}
+
+fn send<T>(sink: &dyn Sink<T>, state: &mut Arc<State<T>>, event: crate::event::Event<T>) {
+    sink(event, &window_target(&state), if state.control_flow == ControlFlow::Exit { &mut ControlFlow::Exit } else { &mut state.control_flow })
+}
+
+impl<T> DispatchData<'static, T> {
+    fn send(&'static self, event: crate::event::Event<T>) { send(self.update.sink, self.state, event) }
+}
+
+#[derive(Clone)] pub struct EventLoopProxy<T>(Sender<T>);
+
+impl<T: 'static> EventLoopProxy<T> {
+    pub fn send_event(&self, event: T) -> Result<(), EventLoopClosed<T>> {
+        self.0.send(event).map_err(|e| {
+            EventLoopClosed(if let std::sync::mpsc::SendError(x) = e {
+                x
+            } else {
+                unreachable!()
+            })
+        })
+    }
+}
+
+impl<T> EventLoop<T> {
+    pub fn create_proxy(&self) -> EventLoopProxy<T> { EventLoopProxy(self.user.0.clone()) }
+
+    pub fn run<S:Sink<T>>(mut self, sink: S) -> ! {
+        self.run_return(sink);
+        std::process::exit(0);
+    }
+
+    pub fn run_return<S:Sink<T>>(&mut self, mut sink: S) {
+        let Self{event_loop, state, user:(user, receiver), ..} = self;
+
+        /*event_loop.handle().insert_source(receiver, |item:T, _, data:&mut DispatchData<T>| { // calloop::sources::channel::Event<_> ? should be T
+            data.sink(crate::event::Event::UserEvent(item));
+        });*/
 
         let seat_handler = { // for a simple setup
             let loop_handle = event_loop.handle();
 
-            use seat::{
+            use smithay_client_toolkit::seat::{
                 pointer::{ThemeManager, ThemeSpec},
                 keyboard::{map_keyboard_repeat, RepeatKind},
             };
 
             let theme_manager = ThemeManager::init(
                 ThemeSpec::System,
-                env.require_global(),
-                env.require_global(),
+                state.env.require_global(),
+                state.env.require_global(),
             );
 
-            let relative_pointer_manager = env.get_global::<ZwpRelativePointerManagerV1>();
+            let relative_pointer_manager = state.env.get_global::<ZwpRelativePointerManagerV1>();
 
-            env.listen_for_seats(move |seat, seat_data, mut data| {
-                let DispatchData{state:State{pointers, .. }, ..} = data.get().unwrap();
+            state.env.listen_for_seats(move |seat, seat_data, mut data| {
+                let DispatchData::<T>{state, ..} = data.get().unwrap();
                 if seat_data.has_pointer {
                     let pointer = theme_manager.theme_pointer_with_impl(&seat,
                         {
                             let pointer = super::pointer::Pointer::default(); // Track focus and reconstruct scroll events
                             move/*pointer*/ |event, themed_pointer, data| {
-                                let DispatchData{update, state:State{sctk_windows, current_cursor, .. }} = data.get().unwrap();
-                                pointer.handle(event, themed_pointer, update, sctk_windows, current_cursor);
+                                let DispatchData::<T>{update, state} = data.get().unwrap();
+                                pointer.handle(event, themed_pointer, update, &state.sctk_windows, state.current_cursor);
                             }
                         }
                     );
@@ -148,21 +197,21 @@ impl<T> EventLoop<T> {
                         use zwp_relative_pointer_v1::Event::*;
                         manager.get_relative_pointer(&pointer).quick_assign(move |_, event, data| match event {
                             RelativeMotion { dx, dy, .. } => {
-                                let data @ DispatchData{update: Update{sink}, ..} = data.get().unwrap();
+                                let data @ DispatchData::<T>{update: Update{sink}, ..} = data.get().unwrap();
                                 let device_id = crate::event::DeviceId(super::super::DeviceId::Wayland(super::DeviceId));
-                                data.sink(crate::event::Event::DeviceEvent{event: DeviceEvent::MouseMotion { delta: (dx, dy) }, device_id});
+                                data.send(crate::event::Event::DeviceEvent{event: DeviceEvent::MouseMotion { delta: (dx, dy) }, device_id});
                             }
                             _ => unreachable!(),
                         });
                     }
 
-                    pointers.push(pointer);
+                    state.pointers.push(pointer);
                 }
 
                 if seat_data.has_keyboard {
                     let _ = map_keyboard_repeat(loop_handle, &seat, None, RepeatKind::System,
                         |event, _, data| {
-                            let DispatchData{update, state} = data.get().unwrap();
+                            let DispatchData::<T>{update, state} = data.get().unwrap();
                             state.keyboard.handle(update, event, false);
                         }
                     ).unwrap();
@@ -172,7 +221,7 @@ impl<T> EventLoop<T> {
                     seat.get_touch().quick_assign({
                         let touch = super::touch::Touch::default(); // Track touch points
                         move |_, event, data| {
-                            let DispatchData{update: Update{sink}, ..} = data.get().unwrap();
+                            let DispatchData::<T>{update: Update{sink}, ..} = data.get().unwrap();
                             touch.handle(sink, event);
                         }
                     });
@@ -181,8 +230,7 @@ impl<T> EventLoop<T> {
         };
 
         // Sync window state
-        let (update, receiver) = unbounded();
-        event_loop.handle().insert_source(receiver, |state@WindowState{surface}, _, data| {
+        /*event_loop.handle().insert_source(receiver, |state@WindowState{surface}, _, data| { // fixme: use a standard futures::channel
             let DispatchData{update:Update{sink}, state:State{pointers, windows, sctk_windows, redraw_events}} = data;
             let window = windows.find(surface).unwrap();
             let sctk_window = sctk_windows.find(surface).unwrap();
@@ -207,98 +255,39 @@ impl<T> EventLoop<T> {
                 state.windows.remove_item(surface);
                 sink(event(Event::Destroyed, surface));
             }
-        });
+        });*/
 
-        Ok(Self{
-            state: State{
-                display,
-                env,
-                update,
-            },
-        })
-    }
-    // required by linux/mod.rs for crate::EventLoop::Deref
-    pub fn window_target(&self) -> &crate::event_loop::EventLoopWindowTarget<T> {
-        &self.window_target.get_or_insert( crate::event_loop::EventLoopWindowTarget{p: crate::platform_impl::EventLoopWindowTarget::Wayland(&self.state)} )
-    }
-}
-
-#[derive(Clone)] pub struct EventLoopProxy<T>(Sender<T>);
-
-impl<T: 'static> EventLoopProxy<T> {
-    pub fn send_event(&self, event: T) -> Result<(), EventLoopClosed<T>> {
-        self.user_sender.send(event).map_err(|e| {
-            EventLoopClosed(if let std::sync::mpsc::SendError(x) = e {
-                x
-            } else {
-                unreachable!()
-            })
-        })
-    }
-}
-
-impl<T> EventLoop<T> {
-    pub fn create_proxy(&self) -> EventLoopProxy<T> { self.channel.0.clone() }
-
-    pub fn run<S:Sink<T>>(mut self, sink: S) -> ! {
-        self.run_return(sink);
-        std::process::exit(0);
-    }
-
-    pub fn run_return<S:Sink<T>>(&mut self, mut sink: S) {
-        let Self{event_loop, state} = self;
-        let sink = |event, state| {
-            sink(
-                event,
-                &mut crate::event_loop::EventLoopWindowTarget{p: crate::platform_impl::EventLoopWindowTarget::Wayland(state)},
-                if state.control_flow == ControlFlow::Exit { &mut ControlFlow::Exit } else { &mut state.control_flow }, // sticky exit
-            )
-        };
-
-        sink(Event::NewEvents(StartCause::Init), self.state);
-
+        send(&sink, &mut state, crate::event::Event::NewEvents(StartCause::Init));
         loop {
             match state.control_flow {
                 ControlFlow::Exit => break,
                 ControlFlow::Poll => {
-                    event_loop.dispatch(std::time::Duration::new(0,0), &mut DispatchData{update: Update{sink}, state: &mut state});
-                    sink(Event::NewEvents(StartCause::Poll), state);
+                    event_loop.dispatch(std::time::Duration::new(0,0), &mut DispatchData{update: Update{sink: &mut sink}, state: &mut state});
+                    send(&sink, &mut state, Event::NewEvents(StartCause::Poll));
                 }
                 ControlFlow::Wait => {
-                    event_loop.dispatch(None, &mut DispatchData{update: Update{sink}, state: &mut state});
-                    sink(Event::NewEvents(StartCause::WaitCancelled{start: Instant::now(), requested_resume: None}), state);
+                    event_loop.dispatch(None, &mut DispatchData{update: Update{sink: &mut sink}, state: &mut state});
+                    send(&sink, &mut state, Event::NewEvents(StartCause::WaitCancelled{start: Instant::now(), requested_resume: None}));
                 }
                 ControlFlow::WaitUntil(deadline) => {
                     let start = Instant::now();
                     let duration = deadline.saturating_duration_since(start);
-                    event_loop.dispatch(Some(duration), &mut DispatchData{update: Update{sink}, state: &mut state});
+                    event_loop.dispatch(Some(duration), &mut DispatchData{update: Update{sink: &mut sink}, state: &mut state});
 
                     let now = Instant::now();
                     if now < deadline {
-                        sink(
-                            Event::NewEvents(StartCause::WaitCancelled {
-                                start,
-                                requested_resume: Some(deadline),
-                            }),
-                            state
-                        );
+                        send(&sink, &mut state, Event::NewEvents(StartCause::WaitCancelled{start, requested_resume: Some(deadline)}));
                     } else {
-                        sink(
-                            Event::NewEvents(StartCause::ResumeTimeReached {
-                                start,
-                                requested_resume: deadline,
-                            }),
-                            state
-                        );
+                        send(&sink, &mut state, Event::NewEvents(StartCause::ResumeTimeReached{start, requested_resume: deadline}));
                     }
                 }
             }
-            sink(Event::MainEventsCleared, state);
+            send(&sink, &mut state, Event::MainEventsCleared);
             // sink.send_all(state.redraw_events.drain(..));
-            for event in state.redraw_events.drain(..) { sink(event) }
-            sink(Event::RedrawEventsCleared, state);
+            for event in state.redraw_events.drain(..) { send(&sink, &mut state, event); }
+            send(&sink, &mut state, Event::RedrawEventsCleared);
         }
-        sink(Event::LoopDestroyed, state);
+        send(&sink, &mut state, Event::LoopDestroyed);
     }
 
     pub fn primary_monitor(&self) -> MonitorHandle {
