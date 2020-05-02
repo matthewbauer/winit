@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, fmt, sync::{Arc, Mutex}, time::Instant};
 use smithay_client_toolkit::{
-    reexports::calloop::{self, channel::{channel as unbounded, Sender}},
+    reexports::calloop::{self, Source, channel::{channel as unbounded, Sender, Channel as Receiver}},
     environment::{Environment, SimpleGlobal},
     default_environment,
     reexports::{
@@ -29,7 +29,7 @@ use crate::{
 };
 use super::window;
 
-trait Sink<T> = FnMut(crate::event::Event<T>, &crate::event_loop::EventLoopWindowTarget<T>, &mut crate::event_loop::ControlFlow);
+pub trait Sink<T> = FnMut(crate::event::Event<T>, &crate::event_loop::EventLoopWindowTarget<T>, &mut crate::event_loop::ControlFlow);
 
 // Application state update
 struct Update<'t, T:'static> {
@@ -48,12 +48,12 @@ default_environment!{Env, desktop,
 }
 
 pub struct Window {
-    surface: WlSurface,
+    pub surface: WlSurface,
     pub size: (u32,u32), // Detect identity set size
     pub scale_factor: u32,
     pub states: Vec<sctk::State>,
     pub current_cursor: &'static str,
-    locked_pointers: Vec<Main<LockedPointer>>,
+    pub locked_pointers: Vec<Main<LockedPointer>>,
 }
 
 impl PartialEq<WlSurface> for Window { fn eq(&self, surface: &WlSurface) -> bool { self.surface == *surface } }
@@ -63,13 +63,13 @@ pub struct Context<T: 'static> {
     pub display: Display,
     pub env: Environment<Env>,
     // Split from Window (!Send,!Sync)
-    sctk_windows: Vec<sctk::Window<ConceptFrame>>,
+    pub sctk_windows: Mutex<Vec<sctk::Window<ConceptFrame>>>, // RefCell ?
     // Arc<Mutex> shared with all window::WindowHandle so size changes in Event::Configure are reflected back on the handle state (WindowHandle::inner_size)
     pub windows: Arc<Mutex<Vec<Window>>>,
-    command: Sender<window::Command>,
+    pub command: (Sender<window::Command>, Source<Receiver<window::Command>>),
     _marker: std::marker::PhantomData<T>
 }
-pub type EventLoopWindowTarget<T:'static> = &'static Context<T>; // Erase lifetime to 'static because winit::EventLoopWindowTarget is missing <'lifetime>
+pub type EventLoopWindowTarget<T> = &'static Context<T>; // Erase lifetime to 'static because winit::EventLoopWindowTarget is missing <'lifetime>
 //impl<T> EventLoopWindowTarget<T> { pub fn display(&self) -> &Display { &*self.display } } // EventLoopWindowTargetExtUnix
 
 // required by linux/mod.rs for crate::EventLoop::Deref
@@ -112,10 +112,10 @@ pub(crate) struct DispatchData<'t, T:'static> {
 unsafe fn erase_lifetime<'t,T:'static>(data: DispatchData<'t,T>) -> DispatchData<'static,T> {
     std::mem::transmute::<DispatchData::<'t,T>, DispatchData::<'static,T>>(data)
 }
-// todo: actualy restore lifetimes, not just allow whatever
+/*// todo: actualy restore lifetimes, not just allow whatever
 unsafe fn restore_erased_lifetime<'t,T:'static>(data: &mut DispatchData::<'static,T>) -> &'t mut DispatchData::<'t,T> {
     std::mem::transmute::<&mut DispatchData::<'static,T>, &mut DispatchData::<'t,T>>(data)
-}
+}*/
 
 /*fn send<T>(sink: &dyn Sink<T>, state: &mut State<T>, event: crate::event::Event<T>) {
     sink(event, &window_target(&state), if state.control_flow == ControlFlow::Exit { &mut ControlFlow::Exit } else { &mut state.control_flow })
@@ -127,7 +127,7 @@ impl<T> DispatchData<'_, T> {
 
 pub struct EventLoop<T: 'static> {
     event_loop: calloop::EventLoop<DispatchData<'static,T>>,
-    user: Sender<T>, // User messages (EventProxy)
+    user: (Sender<T>, Source<Receiver<T>>), // User messages (EventProxy)
     state: State<T>,
     window_target: Option<crate::event_loop::EventLoopWindowTarget<T>>, // crate::EventLoop::Deref -> &EventLoopWindowTarget
 }
@@ -148,14 +148,17 @@ impl<T> EventLoop<T> {
 
         let user = { // Push user messages
             let (sender, receiver) = unbounded::<T>();
-            event_loop.handle().insert_source(receiver, |event, _, sink:&mut DispatchData<T>| { // calloop::sources::channel::Event<_> ? should be T
-                if let calloop::channel::Event::Msg(item) = event { sink.send(crate::event::Event::UserEvent(item)); }
-            });
-            sender
+            (
+                sender,
+                event_loop.handle().insert_source(receiver, |event, _, sink:&mut DispatchData<T>| { // calloop::sources::channel::Event<_> ? should be T
+                    if let calloop::channel::Event::Msg(item) = event { sink.send(crate::event::Event::UserEvent(item)); }
+                }).unwrap()
+            )
         };
 
         let command = { // Window handle command sender
             let (sender, receiver) = unbounded::<window::Command>();
+            (sender,
             event_loop.handle().insert_source(receiver, |calloop_channel_event, _, data| { // fixme: use a standard futures::channel
                 if let calloop::channel::Event::Msg(command) = calloop_channel_event {
                     let event = {
@@ -164,13 +167,13 @@ impl<T> EventLoop<T> {
                         let window::Command{surface,set} = command;
                         let windows_index = windows.iter().position(|w| w==&surface).unwrap();
                         let window = &mut windows[windows_index];
-                        let sctk_windows_index = sctk_windows.iter().position(|w| w.surface()==&surface).unwrap();
-                        let sctk_window = &mut sctk_windows[sctk_windows_index];
+                        let sctk_windows_index = sctk_windows.lock().unwrap().iter().position(|w| w.surface()==&surface).unwrap();
+                        let sctk_window = &mut sctk_windows.lock().unwrap()[sctk_windows_index];
                         use window::Set::*;
                         if let Drop = set {
                             surface.destroy();
                             windows.remove(windows_index);
-                            sctk_windows.remove(sctk_windows_index);
+                            sctk_windows.lock().unwrap().remove(sctk_windows_index);
                             Some(window::event(crate::event::WindowEvent::Destroyed, &surface))
                         } else {
                             match set {
@@ -193,7 +196,7 @@ impl<T> EventLoop<T> {
                                 MinSize(size) => sctk_window.set_min_size(size),
                                 MaxSize(size) => sctk_window.set_max_size(size),
                                 Title(title) => sctk_window.set_title(title),
-                                Cursor(cursor) => { window.current_cursor = cursor; for pointer in pointers { pointer.set_cursor(window.current_cursor, None); } },
+                                Cursor(cursor) => { window.current_cursor = cursor; for pointer in pointers { pointer.set_cursor(window.current_cursor, None).unwrap(); } },
                                 Decorate(true) => sctk_window.set_decorate(sctk::Decorations::FollowServer),
                                 Decorate(false) => sctk_window.set_decorate(sctk::Decorations::None),
                                 Resizable(resizable) => sctk_window.set_resizable(resizable),
@@ -211,8 +214,8 @@ impl<T> EventLoop<T> {
                     };
                     if let Some(event) = event { data.send(event); }
                 }
-            });
-            sender
+            }).unwrap()
+            )
         };
 
         let mut self_ = Self{
@@ -248,7 +251,7 @@ impl<T: 'static> EventLoopProxy<T> {
 }
 
 impl<T> EventLoop<T> {
-    pub fn create_proxy(&self) -> EventLoopProxy<T> { EventLoopProxy(self.user.clone()) }
+    pub fn create_proxy(&self) -> EventLoopProxy<T> { EventLoopProxy(self.user.0.clone()) }
 
     pub fn run<S:Sink<T>>(mut self, sink: S) -> ! {
         self.run_return(sink);
@@ -328,17 +331,17 @@ impl<T> EventLoop<T> {
             match state.control_flow {
                 ControlFlow::Exit => break,
                 ControlFlow::Poll => {
-                    event_loop.dispatch(std::time::Duration::new(0,0), &mut erase_lifetime(DispatchData{update: Update{sink: &mut sink}, state}));
+                    event_loop.dispatch(std::time::Duration::new(0,0), &mut unsafe{erase_lifetime(DispatchData{update: Update{sink: &mut sink}, state})}).unwrap();
                     send(&mut sink, &state.context, &mut state.control_flow, Event::NewEvents(StartCause::Poll));
                 }
                 ControlFlow::Wait => {
-                    event_loop.dispatch(None, &mut erase_lifetime(DispatchData{update: Update{sink: &mut sink}, state}));
+                    event_loop.dispatch(None, &mut unsafe{erase_lifetime(DispatchData{update: Update{sink: &mut sink}, state})}).unwrap();
                     send(&mut sink, &state.context, &mut state.control_flow, Event::NewEvents(StartCause::WaitCancelled{start: Instant::now(), requested_resume: None}));
                 }
                 ControlFlow::WaitUntil(deadline) => {
                     let start = Instant::now();
                     let duration = deadline.saturating_duration_since(start);
-                    event_loop.dispatch(Some(duration), &mut erase_lifetime(DispatchData{update: Update{sink: &mut sink}, state}));
+                    event_loop.dispatch(Some(duration), &mut unsafe{erase_lifetime(DispatchData{update: Update{sink: &mut sink}, state})}).unwrap();
 
                     let now = Instant::now();
                     if now < deadline {

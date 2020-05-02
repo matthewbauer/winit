@@ -46,7 +46,7 @@ pub enum Set {
     CursorGrab(bool),
     Drop
 }
-pub struct Command { surface: WlSurface, set: Set }
+pub struct Command { pub surface: WlSurface, pub set: Set }
 
 pub struct Handle {
     display: &'static Display,
@@ -58,14 +58,14 @@ pub struct Handle {
     // todo: futures::channel ^
     // Asynchronous state on the handle, sent on the update channel by all setters
     //state: State,
-    cursor: &'static str,
-    cursor_visible: bool,
+    //cursor: &'static str,
+    //cursor_visible: bool,
 }
 
 fn output(fullscreen: Fullscreen) -> WlOutput {
     match fullscreen {
         Fullscreen::Exclusive(_) => panic!("Wayland doesn't support exclusive fullscreen"),
-        Fullscreen::Borderless(crate::monitor::MonitorHandle {inner: platform::MonitorHandle::Wayland(ref monitor_id)}) => monitor_id.0,
+        Fullscreen::Borderless(crate::monitor::MonitorHandle {inner: platform::MonitorHandle::Wayland(monitor_id)}) => monitor_id.0,
         //#[allow(unreachable_patterns)] Fullscreen::Borderless(_) => unreachable!(),
     }
 }
@@ -85,7 +85,7 @@ impl Handle {
                 fn with<T, R>(data: &mut DispatchData<T>, surface: &WlSurface, f:impl Fn(&mut super::event_loop::Window) -> R) -> R {
                     f(data.state.context.windows.lock().unwrap().iter_mut().find(|w| w == &surface).unwrap())
                 }
-                let size = with(&mut data, &surface, |window| {
+                let mut size = with(&mut data, &surface, |window| {
                     window.scale_factor = scale_factor as u32;
                     LogicalSize::<f64>::from(window.size).to_physical::<u32>(scale_factor as f64)
                 });
@@ -102,13 +102,13 @@ impl Handle {
         let size = attributes.inner_size.map(|size| size.to_logical::<f64>(identity_scale_factor as f64).into()).unwrap_or((800, 600));
         let mut window = env.create_window::<ConceptFrame, _>(surface.clone(), size, {
             let surface = surface.clone();
-            move |event, data| {
+            move |event, mut data| {
                 let data = data.get().unwrap();
                 let event = {
                     let DispatchData::<T>{state:State{context:Context{windows,sctk_windows,..},..},..} = data;
                     use smithay_client_toolkit::window::Event::*;
                     match event {
-                        Configure { new_size, states } => if let Some(window) = windows.lock().unwrap().iter_mut().find(|&w| w == &surface) /*=>*/ {
+                        Configure { new_size, states } => if let Some(window) = windows.lock().unwrap().iter_mut().find(|w| *w == &surface) /*=>*/ {
                             window.states = states;
                             let size = new_size.unwrap_or(window.size);
                             let event = if window.size != size || window.scale_factor != get_surface_scale_factor(&surface) as u32 {
@@ -118,12 +118,13 @@ impl Handle {
                                 //redraw_events.push(crate::event::Event::RedrawRequested(id(&surface))); // is RedrawRequested expected after Resized ?
                                 Some(Event::Resized(size))
                             } else { None };
-                            let sctk_window = sctk_windows.iter().find(|&w| w.surface() == &surface).unwrap();
+                            let mut sctk_windows = sctk_windows.lock().unwrap();
+                            let sctk_window = sctk_windows.iter_mut().find(|w| w.surface() == &surface).unwrap();
                             {let (w, h) = size; sctk_window.resize(w, h);}
                             sctk_window.refresh();
                             event
                         } else { unreachable!() },
-                        Refresh => if let Some(window) = sctk_windows.iter().find(|&w| w.surface() == &surface) /*=>*/ { window.refresh(); None } else { unreachable!() },
+                        Refresh => if let Some(window) = sctk_windows.lock().unwrap().iter_mut().find(|w| w.surface() == &surface) /*=>*/ { window.refresh(); None } else { unreachable!() },
                         Close => Some(Event::CloseRequested),
                     }
                 };
@@ -140,10 +141,10 @@ impl Handle {
         window.set_min_size(attributes.min_inner_size.map(|size| size.to_logical::<f64>(identity_scale_factor as f64).into()));
         window.set_max_size(attributes.max_inner_size.map(|size| size.to_logical::<f64>(identity_scale_factor as f64).into()));
 
-        sctk_windows.push(window);
+        sctk_windows.lock().unwrap().push(window);
 
         windows.lock().unwrap().push(super::event_loop::Window{
-            surface,
+            surface: surface.clone(),
             size: Default::default(), // until Configure
             scale_factor: identity_scale_factor, // until surface enter output
             states: Default::default(), // until Configure
@@ -151,7 +152,7 @@ impl Handle {
             locked_pointers: Default::default(),
         });
 
-        Ok(Self{display, env, surface, windows, command, cursor: "left_ptr", cursor_visible: true})
+        Ok(Self{display, env, surface, windows, command: &command.0, /*cursor: "left_ptr", cursor_visible: true*/})
     }
 
     pub fn id(&self) -> super::WindowId { self.surface.as_ref().id() }
@@ -172,21 +173,21 @@ impl Handle {
         }
     }
 
-    fn window(&self) -> &super::event_loop::Window { self.windows.lock().unwrap().iter().find(|&w| w==&self.surface).unwrap() }
+    fn with<R>(&self, f: impl Fn(&super::event_loop::Window) -> R) -> R { f(self.windows.lock().unwrap().iter().find(|&w| w==&self.surface).unwrap()) }
 
-    pub fn inner_size(&self) -> PhysicalSize<u32> { LogicalSize::<f64>::from(self.window().size).to_physical(self.scale_factor() as f64) }
+    pub fn inner_size(&self) -> PhysicalSize<u32> { self.with(|window| LogicalSize::<f64>::from(window.size).to_physical(self.scale_factor() as f64)) }
     pub fn outer_size(&self) -> PhysicalSize<u32> { self.inner_size() /*fixme*/ }
 
     pub fn inner_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> { Err(NotSupportedError::new()) }
     pub fn outer_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> { Err(NotSupportedError::new()) }
 
     pub fn fullscreen(&self) -> Option<Fullscreen> {
-        if self.window().states.contains(&smithay_client_toolkit::window::State::Fullscreen) {
+        if self.with(|window| window.states.contains(&smithay_client_toolkit::window::State::Fullscreen)) {
             Some(Fullscreen::Borderless(crate::monitor::MonitorHandle {inner: platform::MonitorHandle::Wayland(self.current_monitor())}))
         } else { None }
     }
 
-    pub fn set(&self, set: Set) { self.command.send(Command{surface: self.surface, set}).unwrap() }
+    pub fn set(&self, set: Set) { self.command.send(Command{surface: self.surface.clone(), set}).unwrap() }
     pub fn request_redraw(&self) { self.set(RequestRedraw); }
     pub fn set_title(&self, title: &str) { self.set(Title(title.into())); }
     pub fn set_visible(&self, _visible: bool) { /*todo*/ }
@@ -200,8 +201,14 @@ impl Handle {
     pub fn set_minimized(&self, minimized: bool) { if minimized { self.set(Minimized); } }
     pub fn set_maximized(&self, maximized: bool) { self.set(Maximized(maximized)); }
     pub fn set_fullscreen(&self, fullscreen: Option<Fullscreen>) { self.set(Fullscreen(fullscreen.map(output))); }
-    pub fn set_cursor_icon(&self, cursor_icon: CursorIcon) { self.cursor = conversion::cursor(cursor_icon); if self.cursor_visible { self.set(Cursor(self.cursor)); } }
-    pub fn set_cursor_visible(&self, visible: bool) { self.cursor_visible = visible; self.set(Cursor(if self.cursor_visible { self.cursor } else { "" })) }
+    pub fn set_cursor_icon(&self, cursor_icon: CursorIcon) { // why is this not &mut ?
+        //self.cursor = conversion::cursor(cursor_icon); if self.cursor_visible { self.set(Cursor(self.cursor)); }
+        self.set(Cursor(conversion::cursor(cursor_icon))); // Assume visible
+    }
+    pub fn set_cursor_visible(&self, visible: bool) {
+        //self.cursor_visible = visible; self.set(Cursor(if self.cursor_visible { self.cursor } else { "" }))
+        self.set(Cursor(if visible { "left_ptr" } else { "" })) // Assume default icon
+    }
     pub fn set_cursor_grab(&self, grab: bool) -> Result<(), ExternalError> { self.set(CursorGrab(grab)); Ok(()) }
     pub fn set_cursor_position(&self, _pos: Position) -> Result<(), ExternalError> { Err(ExternalError::NotSupported(NotSupportedError::new())) }
     pub fn set_outer_position(&self, _pos: Position) { /*todo*/ }

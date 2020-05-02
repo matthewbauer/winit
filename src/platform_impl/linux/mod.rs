@@ -16,12 +16,12 @@ use self::x11::{ffi::XVisualInfo, util::WindowType as XWindowType, XConnection, 
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize, Position, Size},
     error::{ExternalError, NotSupportedError, OsError as RootOsError},
-    event::Event,
     event_loop::{ControlFlow, EventLoopClosed, EventLoopWindowTarget as RootELW},
     icon::Icon,
     monitor::{MonitorHandle as RootMonitorHandle, VideoMode as RootVideoMode},
     window::{CursorIcon, Fullscreen, WindowAttributes},
 };
+#[cfg(feature = "x11")] use crate::event::Event;
 
 pub(crate) use crate::icon::RgbaIcon as PlatformIcon;
 
@@ -777,6 +777,7 @@ impl<T> EventLoopWindowTarget<T> {
     }
 }
 
+#[cfg(feature = "x11")]
 fn sticky_exit_callback<T, F>(
     evt: Event<'_, T>,
     target: &RootELW<T>,

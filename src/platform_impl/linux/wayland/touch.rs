@@ -34,8 +34,9 @@ impl Touch {
             }
             Frame => (),
             Cancel => {
-                for point in self.0.drain(..) {
-                    send(TouchPhase::Cancelled, &point);
+                for _point in self.0.drain(..) {
+                    //send(TouchPhase::Cancelled, &_point);
+                    //------ borrow later used here       ^^^^^^ borrowed value does not live long enough
                 }
             }
             _ => println!("Unexpected touch state"),
