@@ -1,6 +1,6 @@
 use smithay_client_toolkit::seat::keyboard;
 use crate::event::ModifiersState;
-pub(crate) fn modifiers(mods: keyboard::ModifiersState) -> ModifiersState {
+pub fn modifiers(mods: keyboard::ModifiersState) -> ModifiersState {
     let mut m = ModifiersState::empty();
     m.set(ModifiersState::SHIFT, mods.shift);
     m.set(ModifiersState::CTRL, mods.ctrl);
@@ -10,7 +10,7 @@ pub(crate) fn modifiers(mods: keyboard::ModifiersState) -> ModifiersState {
 }
 
 use crate::window::CursorIcon;
-fn cursor(cursor: CursorIcon) -> &'static str {
+pub fn cursor(cursor: CursorIcon) -> &'static str {
     use CursorIcon::*;
     match cursor {
         Alias => "link",
@@ -58,7 +58,7 @@ fn cursor(cursor: CursorIcon) -> &'static str {
 }
 
 use {keyboard::Event, crate::event::VirtualKeyCode};
-pub fn key(key : Event/*::Key*/) -> Option<VirtualKeyCode> { if let Event::Key{rawkey, keysym,..} = key { //#2593
+pub fn key(key : &Event/*::Key*/) -> Option<VirtualKeyCode> { if let Event::Key{rawkey, keysym,..} = key { //#2593
     use {keyboard::keysyms::*, VirtualKeyCode::*};
     #[allow(non_upper_case_globals)]
     match rawkey {
@@ -73,7 +73,7 @@ pub fn key(key : Event/*::Key*/) -> Option<VirtualKeyCode> { if let Event::Key{r
         9 => Some(Key8),
         10 => Some(Key9),
         11 => Some(Key0),
-        _ => match keysym {
+        _ => match *keysym {
             // letters
             XKB_KEY_A | XKB_KEY_a => Some(A),
             XKB_KEY_B | XKB_KEY_b => Some(B),
@@ -239,4 +239,4 @@ pub fn key(key : Event/*::Key*/) -> Option<VirtualKeyCode> { if let Event::Key{r
             _ => None,
         }
     }
-}}
+} else { unreachable!() } }

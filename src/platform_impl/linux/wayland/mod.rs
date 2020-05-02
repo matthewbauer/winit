@@ -2,15 +2,8 @@
 
 pub use self::{
     event_loop::{EventLoop, EventLoopProxy, EventLoopWindowTarget, MonitorHandle, VideoMode},
-    window::WindowHandle as Window,
+    window::Handle as Window,
 };
-
-trait Sink<T> = FnMut(crate::event::Event<T>, &crate::event_loop::EventLoopWindowTarget<T>, &mut crate::event_loop::ControlFlow);
-
-// Application state update
-struct Update<'t, T:'static> {
-    sink: &'t mut dyn Sink<T>,
-}
 
 mod event_loop;
 mod keyboard;

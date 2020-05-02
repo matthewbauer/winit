@@ -1,21 +1,25 @@
-use std::{collections::VecDeque, fmt, sync::{Arc, Mutex, Weak}, time::Instant};
+use std::{collections::VecDeque, fmt, sync::{Arc, Mutex}, time::Instant};
 use smithay_client_toolkit::{
-    reexports::calloop::{self, channel::{channel as unbounded, Sender, Channel as Receiver}},
+    reexports::calloop::{self, channel::{channel as unbounded, Sender}},
     environment::{Environment, SimpleGlobal},
     default_environment,
     reexports::{
-        client::{ConnectError, Display, protocol::{wl_output, wl_surface::WlSurface}},
+        client::{ConnectError, Display, Main, protocol::{wl_output, wl_surface::WlSurface}},
         protocols::unstable::{
-            pointer_constraints::v1::client::zwp_pointer_constraints_v1::{ZwpPointerConstraintsV1},
+            pointer_constraints::v1::client::{
+                zwp_pointer_constraints_v1::{ZwpPointerConstraintsV1 as PointerConstraints, Lifetime},
+                zwp_locked_pointer_v1::ZwpLockedPointerV1 as LockedPointer
+            },
             relative_pointer::v1::client::{
-                zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
-                zwp_relative_pointer_v1
+                zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1 as RelativePointerManager,
+                zwp_relative_pointer_v1 as relative_pointer
             }
         },
     },
     output::with_output_info,
     seat::pointer::ThemedPointer,
-    window::{Window as SCTKWindow, ConceptFrame},
+    window::{self as sctk, ConceptFrame},
+    get_surface_scale_factor
 };
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -23,58 +27,108 @@ use crate::{
     event_loop::{ControlFlow, EventLoopClosed},
     platform_impl::platform,
 };
-use super::{Update, Sink,  window::WindowState};
+use super::window;
+
+trait Sink<T> = FnMut(crate::event::Event<T>, &crate::event_loop::EventLoopWindowTarget<T>, &mut crate::event_loop::ControlFlow);
+
+// Application state update
+struct Update<'t, T:'static> {
+    sink: &'t mut dyn Sink<T>,
+}
 
 default_environment!{Env, desktop,
     fields = [
-        relative_pointer_manager: SimpleGlobal<ZwpRelativePointerManagerV1>,
-        pointer_constraints: SimpleGlobal<ZwpPointerConstraintsV1>
+        relative_pointer_manager: SimpleGlobal<RelativePointerManager>,
+        pointer_constraints: SimpleGlobal<PointerConstraints>
     ],
     singles = [
-        ZwpRelativePointerManagerV1 => relative_pointer_manager,
-        ZwpPointerConstraintsV1 => pointer_constraints
+        RelativePointerManager => relative_pointer_manager,
+        PointerConstraints => pointer_constraints
     ]
 }
 
 pub struct Window {
     surface: WlSurface,
-    size: (u32, u32), scale_factor: u32,
-    fullscreen: bool
+    pub size: (u32,u32), // Detect identity set size
+    pub scale_factor: u32,
+    pub states: Vec<sctk::State>,
+    pub current_cursor: &'static str,
+    locked_pointers: Vec<Main<LockedPointer>>,
+}
+
+impl PartialEq<WlSurface> for Window { fn eq(&self, surface: &WlSurface) -> bool { self.surface == *surface } }
+impl PartialEq for Window { fn eq(&self, other: &Self) -> bool { *self == other.surface } }
+
+pub struct Context<T: 'static> {
+    pub display: Display,
+    pub env: Environment<Env>,
+    // Split from Window (!Send,!Sync)
+    sctk_windows: Vec<sctk::Window<ConceptFrame>>,
+    // Arc<Mutex> shared with all window::WindowHandle so size changes in Event::Configure are reflected back on the handle state (WindowHandle::inner_size)
+    pub windows: Arc<Mutex<Vec<Window>>>,
+    command: Sender<window::Command>,
+    _marker: std::marker::PhantomData<T>
+}
+pub type EventLoopWindowTarget<T:'static> = &'static Context<T>; // Erase lifetime to 'static because winit::EventLoopWindowTarget is missing <'lifetime>
+//impl<T> EventLoopWindowTarget<T> { pub fn display(&self) -> &Display { &*self.display } } // EventLoopWindowTargetExtUnix
+
+// required by linux/mod.rs for crate::EventLoop::Deref
+pub fn window_target<T>(event_loop_window_target: &Context<T>) -> crate::event_loop::EventLoopWindowTarget<T> {
+    crate::event_loop::EventLoopWindowTarget{
+        p: crate::platform_impl::EventLoopWindowTarget::Wayland(
+            unsafe{std::mem::transmute::<&Context<T>, &'static Context<T>>(&event_loop_window_target)}
+            /*'EventLoopWindowTarget:'EventLoop*/
+        ),
+        _marker: Default::default()
+    }
+}
+
+fn send<T>(sink: &mut dyn Sink<T>, context: &Context<T>, control_flow: &mut ControlFlow, event: crate::event::Event<T>) {
+    let mut exit = ControlFlow::Exit;
+    sink(event, &window_target(&context), if *control_flow == ControlFlow::Exit { &mut exit } else { control_flow })
+}
+
+impl<T> Update<'_, T> {
+    fn send(&mut self, context: &Context<T>, control_flow: &mut ControlFlow, event: crate::event::Event<T>) {
+        send(self.sink, context, control_flow, event);
+    }
 }
 
 /// Mutable state, time shared by handlers on main thread
 pub struct State<T: 'static> {
-    pub display: Display,
-    pub env: Environment<Env>,
+    pub context: Context<T>,
     keyboard: super::keyboard::Keyboard,
-    current_cursor: &'static str, // pointer::Enter
     pointers: Vec<ThemedPointer>, // Window::set_pointer
-    sctk_windows: Vec<SCTKWindow<ConceptFrame>>,
-    windows: Arc<Mutex<Vec<Window>>>,
-    update: Sender<WindowState>,
-    control_flow: ControlFlow, // for EventLoopWindowTarget
+    control_flow: ControlFlow,
     redraw_events: Vec<Event<'static, T>>,
 }
 
-// pub impl Deref<..> EventLoop, Window::new(..)
-/*pub struct EventLoopWindowTarget<T: 'static> {
-    state: Weak<State>, // Workaround 'static lifetime requirement for winit::EventLoopWindowTarget
-    //event_loop: &'static EventLoop<T>,
-    _marker: std::marker::PhantomData<T> // Mark whole backend with custom user event type...
+pub(crate) struct DispatchData<'t, T:'static> {
+    update: Update<'t, T>,
+    pub state: &'t mut State<T>,
+}
+
+// wayland-client requires DispatchData:Any:'static (i.e erases lifetimes)
+unsafe fn erase_lifetime<'t,T:'static>(data: DispatchData<'t,T>) -> DispatchData<'static,T> {
+    std::mem::transmute::<DispatchData::<'t,T>, DispatchData::<'static,T>>(data)
+}
+// todo: actualy restore lifetimes, not just allow whatever
+unsafe fn restore_erased_lifetime<'t,T:'static>(data: &mut DispatchData::<'static,T>) -> &'t mut DispatchData::<'t,T> {
+    std::mem::transmute::<&mut DispatchData::<'static,T>, &mut DispatchData::<'t,T>>(data)
+}
+
+/*fn send<T>(sink: &dyn Sink<T>, state: &mut State<T>, event: crate::event::Event<T>) {
+    sink(event, &window_target(&state), if state.control_flow == ControlFlow::Exit { &mut ControlFlow::Exit } else { &mut state.control_flow })
 }*/
-pub type EventLoopWindowTarget<T: 'static> = Weak<State<T>>;
-/*impl<T> EventLoopWindowTarget<T> {
-    pub fn display(&self) -> &Display {
-        &*self.display
-    }
-}*/
-//pub type EventLoopWindowTarget<T: 'static> = &'static EventLoop<T>;
+
+impl<T> DispatchData<'_, T> {
+    pub fn send(&mut self, event: crate::event::Event<T>) { send(&mut self.update.sink, &self.state.context, &mut self.state.control_flow, event) }
+}
 
 pub struct EventLoop<T: 'static> {
     event_loop: calloop::EventLoop<DispatchData<'static,T>>,
-    receiver: Receiver<WindowState>,
-    state: Arc<State<T>>, // Arc to workaround EventLoopWindowTarget lifetime requirement
-    pub user: (Sender<T>, Receiver<T>), // EventProxy
+    user: Sender<T>, // User messages (EventProxy)
+    state: State<T>,
     window_target: Option<crate::event_loop::EventLoopWindowTarget<T>>, // crate::EventLoop::Deref -> &EventLoopWindowTarget
 }
 
@@ -89,68 +143,112 @@ impl<T> EventLoop<T> {
             ]
         )?;
 
-        let mut event_loop = calloop::EventLoop::<DispatchData<T>>::new().unwrap();
-        smithay_client_toolkit::WaylandSource::new(queue) // Moves
-            .quick_insert(event_loop.handle())
-            .unwrap();
+        let event_loop = calloop::EventLoop/*::<DispatchData<T>>*/::new().unwrap();
+        smithay_client_toolkit::WaylandSource::new(queue).quick_insert(event_loop.handle()).unwrap();
 
-        let (update, receiver) = unbounded();
-        Ok(Self{
-            event_loop, receiver,
-            state: Arc::new(State{
-                display, env,
+        let user = { // Push user messages
+            let (sender, receiver) = unbounded::<T>();
+            event_loop.handle().insert_source(receiver, |event, _, sink:&mut DispatchData<T>| { // calloop::sources::channel::Event<_> ? should be T
+                if let calloop::channel::Event::Msg(item) = event { sink.send(crate::event::Event::UserEvent(item)); }
+            });
+            sender
+        };
+
+        let command = { // Window handle command sender
+            let (sender, receiver) = unbounded::<window::Command>();
+            event_loop.handle().insert_source(receiver, |calloop_channel_event, _, data| { // fixme: use a standard futures::channel
+                if let calloop::channel::Event::Msg(command) = calloop_channel_event {
+                    let event = {
+                        let DispatchData{state:State{context:Context{env, windows, sctk_windows,..},redraw_events, pointers,..},..} = data;
+                        let mut windows = windows.lock().unwrap();
+                        let window::Command{surface,set} = command;
+                        let windows_index = windows.iter().position(|w| w==&surface).unwrap();
+                        let window = &mut windows[windows_index];
+                        let sctk_windows_index = sctk_windows.iter().position(|w| w.surface()==&surface).unwrap();
+                        let sctk_window = &mut sctk_windows[sctk_windows_index];
+                        use window::Set::*;
+                        if let Drop = set {
+                            surface.destroy();
+                            windows.remove(windows_index);
+                            sctk_windows.remove(sctk_windows_index);
+                            Some(window::event(crate::event::WindowEvent::Destroyed, &surface))
+                        } else {
+                            match set {
+                                Drop => unreachable!(),
+                                Size(size) => {
+                                    if window.size != size || window.scale_factor != get_surface_scale_factor(&surface) as u32 {
+                                        window.size = size;
+                                        window.scale_factor = get_surface_scale_factor(&surface) as u32;
+                                        redraw_events.push(Event::RedrawRequested(window::id(&surface)));
+                                    }
+                                    {let (w, h) = size; sctk_window.resize(w, h);}
+                                    sctk_window.refresh();
+                                }
+                                RequestRedraw => redraw_events.push(Event::RedrawRequested(window::id(&surface))),
+                                Minimized => sctk_window.set_minimized(),
+                                Maximized(true) => sctk_window.set_maximized(),
+                                Maximized(false) => sctk_window.unset_maximized(),
+                                Fullscreen(Some(output)) => sctk_window.set_fullscreen(Some(&output)),
+                                Fullscreen(None) => sctk_window.unset_fullscreen(),
+                                MinSize(size) => sctk_window.set_min_size(size),
+                                MaxSize(size) => sctk_window.set_max_size(size),
+                                Title(title) => sctk_window.set_title(title),
+                                Cursor(cursor) => { window.current_cursor = cursor; for pointer in pointers { pointer.set_cursor(window.current_cursor, None); } },
+                                Decorate(true) => sctk_window.set_decorate(sctk::Decorations::FollowServer),
+                                Decorate(false) => sctk_window.set_decorate(sctk::Decorations::None),
+                                Resizable(resizable) => sctk_window.set_resizable(resizable),
+                                CursorGrab(true) => {
+                                    if let Some(pointer_constraints) = env.get_global::<PointerConstraints>() {
+                                        window.locked_pointers = pointers.iter().map(
+                                            |pointer| pointer_constraints.lock_pointer(&surface, pointer, None, Lifetime::Persistent.to_raw())
+                                        ).collect();
+                                    }
+                                }
+                                CursorGrab(false) => { window.locked_pointers.clear(); }
+                            };
+                            None
+                        }
+                    };
+                    if let Some(event) = event { data.send(event); }
+                }
+            });
+            sender
+        };
+
+        let mut self_ = Self{
+            event_loop,
+            user,
+            state: State{
+                context: Context{
+                    display, env,
+                    sctk_windows: Default::default(),
+                    windows: Default::default(),
+                    command,
+                    _marker: Default::default(),
+                },
                 keyboard: Default::default(),
-                current_cursor: "left_ptr",
                 pointers: Default::default(),
-                sctk_windows: Default::default(),
-                windows: Default::default(),
-                update,
                 control_flow: ControlFlow::Wait,
                 redraw_events: Default::default(),
-            }),
-            user: unbounded(),
+            },
             window_target: None,
-        })
+        };
+        self_.window_target = Some(window_target(&self_.state.context)); // Workaround self-reference (could use rental instead)
+        Ok(self_)
     }
+
+    // required by linux/mod.rs for crate::EventLoop::Deref
+    pub fn window_target(&self) -> &crate::event_loop::EventLoopWindowTarget<T> { self.window_target.as_ref().unwrap() }
 }
 
-// required by linux/mod.rs for crate::EventLoop::Deref // need Arc to workaround lifetime req for EventLoopWindowTarget
-pub fn window_target<T>(state: &Arc<State<T>>) -> crate::event_loop::EventLoopWindowTarget<T> {
-    crate::event_loop::EventLoopWindowTarget{p: crate::platform_impl::EventLoopWindowTarget::Wayland(Arc::downgrade(&state)), _marker: Default::default()}
-}
-impl<T> EventLoop<T> {
-    pub fn window_target(&self) -> &crate::event_loop::EventLoopWindowTarget<T> { &self.window_target.get_or_insert(window_target(&self.state)) }
-}
-
-pub(crate) struct DispatchData<'t, T:'static> {
-    update: Update<'t, T>,
-    state: &'t mut Arc<State<T>>,
-}
-
-fn send<T>(sink: &dyn Sink<T>, state: &mut Arc<State<T>>, event: crate::event::Event<T>) {
-    sink(event, &window_target(&state), if state.control_flow == ControlFlow::Exit { &mut ControlFlow::Exit } else { &mut state.control_flow })
-}
-
-impl<T> DispatchData<'static, T> {
-    fn send(&'static self, event: crate::event::Event<T>) { send(self.update.sink, self.state, event) }
-}
-
-#[derive(Clone)] pub struct EventLoopProxy<T>(Sender<T>);
-
+pub struct EventLoopProxy<T>(Sender<T>);
+impl<T> Clone for EventLoopProxy<T> { fn clone(&self) -> Self { Self(self.0.clone()) } }
 impl<T: 'static> EventLoopProxy<T> {
-    pub fn send_event(&self, event: T) -> Result<(), EventLoopClosed<T>> {
-        self.0.send(event).map_err(|e| {
-            EventLoopClosed(if let std::sync::mpsc::SendError(x) = e {
-                x
-            } else {
-                unreachable!()
-            })
-        })
-    }
+    pub fn send_event(&self, event: T) -> Result<(), EventLoopClosed<T>> { self.0.send(event).map_err(|std::sync::mpsc::SendError(e)| EventLoopClosed(e)) }
 }
 
 impl<T> EventLoop<T> {
-    pub fn create_proxy(&self) -> EventLoopProxy<T> { EventLoopProxy(self.user.0.clone()) }
+    pub fn create_proxy(&self) -> EventLoopProxy<T> { EventLoopProxy(self.user.clone()) }
 
     pub fn run<S:Sink<T>>(mut self, sink: S) -> ! {
         self.run_return(sink);
@@ -158,14 +256,10 @@ impl<T> EventLoop<T> {
     }
 
     pub fn run_return<S:Sink<T>>(&mut self, mut sink: S) {
-        let Self{event_loop, state, user:(user, receiver), ..} = self;
-
-        /*event_loop.handle().insert_source(receiver, |item:T, _, data:&mut DispatchData<T>| { // calloop::sources::channel::Event<_> ? should be T
-            data.sink(crate::event::Event::UserEvent(item));
-        });*/
+        let Self{event_loop, state, ..} = self;
 
         let seat_handler = { // for a simple setup
-            let loop_handle = event_loop.handle();
+            let (loop_handle, env) = (event_loop.handle(), &state.context.env);
 
             use smithay_client_toolkit::seat::{
                 pointer::{ThemeManager, ThemeSpec},
@@ -174,30 +268,30 @@ impl<T> EventLoop<T> {
 
             let theme_manager = ThemeManager::init(
                 ThemeSpec::System,
-                state.env.require_global(),
-                state.env.require_global(),
+                env.require_global(),
+                env.require_global(),
             );
 
-            let relative_pointer_manager = state.env.get_global::<ZwpRelativePointerManagerV1>();
+            let relative_pointer_manager = env.get_global::<RelativePointerManager>();
 
-            state.env.listen_for_seats(move |seat, seat_data, mut data| {
-                let DispatchData::<T>{state, ..} = data.get().unwrap();
+            env.listen_for_seats(move |seat, seat_data, mut data| {
+                let DispatchData::<T>{state:State{pointers,..}, ..} = data.get().unwrap();
                 if seat_data.has_pointer {
                     let pointer = theme_manager.theme_pointer_with_impl(&seat,
                         {
-                            let pointer = super::pointer::Pointer::default(); // Track focus and reconstruct scroll events
-                            move/*pointer*/ |event, themed_pointer, data| {
-                                let DispatchData::<T>{update, state} = data.get().unwrap();
-                                pointer.handle(event, themed_pointer, update, &state.sctk_windows, state.current_cursor);
+                            let mut pointer = super::pointer::Pointer::default(); // Track focus and reconstruct scroll events
+                            move/*pointer*/ |event, themed_pointer, mut data| {
+                                let DispatchData::<T>{update, state:State{context,mut control_flow,..},..} = data.get().unwrap();
+                                pointer.handle(themed_pointer, |e,s| update.send(&context, &mut control_flow, super::window::event(e, s)), &context.windows.lock().unwrap(), event);
                             }
                         }
                     );
 
-                    if let Some(manager) = relative_pointer_manager {
-                        use zwp_relative_pointer_v1::Event::*;
-                        manager.get_relative_pointer(&pointer).quick_assign(move |_, event, data| match event {
+                    if let Some(manager) = &relative_pointer_manager {
+                        use relative_pointer::Event::*;
+                        manager.get_relative_pointer(&pointer).quick_assign(move |_, event, mut data| match event {
                             RelativeMotion { dx, dy, .. } => {
-                                let data @ DispatchData::<T>{update: Update{sink}, ..} = data.get().unwrap();
+                                let data = data.get::<DispatchData<T>>().unwrap();
                                 let device_id = crate::event::DeviceId(super::super::DeviceId::Wayland(super::DeviceId));
                                 data.send(crate::event::Event::DeviceEvent{event: DeviceEvent::MouseMotion { delta: (dx, dy) }, device_id});
                             }
@@ -205,97 +299,70 @@ impl<T> EventLoop<T> {
                         });
                     }
 
-                    state.pointers.push(pointer);
+                    pointers.push(pointer);
                 }
 
                 if seat_data.has_keyboard {
-                    let _ = map_keyboard_repeat(loop_handle, &seat, None, RepeatKind::System,
-                        |event, _, data| {
-                            let DispatchData::<T>{update, state} = data.get().unwrap();
-                            state.keyboard.handle(update, event, false);
+                    let _ = map_keyboard_repeat(loop_handle.clone(), &seat, None, RepeatKind::System,
+                        |event, _, mut data| {
+                            let DispatchData::<T>{update, state:State{context,keyboard,control_flow,..},..} = data.get().unwrap();
+                            keyboard.handle(|e,s| update.send(context, control_flow, super::window::event(e, s)), event, false);
                         }
                     ).unwrap();
                 }
 
                 if seat_data.has_touch {
                     seat.get_touch().quick_assign({
-                        let touch = super::touch::Touch::default(); // Track touch points
-                        move |_, event, data| {
-                            let DispatchData::<T>{update: Update{sink}, ..} = data.get().unwrap();
-                            touch.handle(sink, event);
+                        let mut touch = super::touch::Touch::default(); // Track touch points
+                        move |_, event, mut data| {
+                            let data = data.get::<DispatchData<T>>().unwrap();
+                            touch.handle(|e,s| data.send(super::window::event(e, s)), event);
                         }
                     });
                 }
             });
         };
 
-        // Sync window state
-        /*event_loop.handle().insert_source(receiver, |state@WindowState{surface}, _, data| { // fixme: use a standard futures::channel
-            let DispatchData{update:Update{sink}, state:State{pointers, windows, sctk_windows, redraw_events}} = data;
-            let window = windows.find(surface).unwrap();
-            let sctk_window = sctk_windows.find(surface).unwrap();
-
-            if window.size != state.size || window.scale_factor != state.scale_factor {
-                redraw_events.push(sink(event(Event::RedrawRequested, window.surface)));
-                {let (w, h) = state.size; sctk_window.resize(w, h);}
-                sctk_window.refresh();
-            }
-
-            if state.decorate { sctk_window.set_decorate(Decorations::FollowServer); }
-            else { sctk_window.set_decorate(Decorations::None); }
-
-            if let Some(pointer_constraints) = env.get_global() {
-                state.pointer_constraints = pointers.iter().filter(|_| state.grab_cursor).map(
-                    |pointer| pointer_constraints.lock_pointer(surface, pointer, None, Lifetime::Persistent.to_raw())
-                ).collect();
-            }
-
-            if state.drop {
-                surface.destroy();
-                state.windows.remove_item(surface);
-                sink(event(Event::Destroyed, surface));
-            }
-        });*/
-
-        send(&sink, &mut state, crate::event::Event::NewEvents(StartCause::Init));
+        send(&mut sink, &state.context, &mut state.control_flow, crate::event::Event::NewEvents(StartCause::Init));
         loop {
             match state.control_flow {
                 ControlFlow::Exit => break,
                 ControlFlow::Poll => {
-                    event_loop.dispatch(std::time::Duration::new(0,0), &mut DispatchData{update: Update{sink: &mut sink}, state: &mut state});
-                    send(&sink, &mut state, Event::NewEvents(StartCause::Poll));
+                    event_loop.dispatch(std::time::Duration::new(0,0), &mut erase_lifetime(DispatchData{update: Update{sink: &mut sink}, state}));
+                    send(&mut sink, &state.context, &mut state.control_flow, Event::NewEvents(StartCause::Poll));
                 }
                 ControlFlow::Wait => {
-                    event_loop.dispatch(None, &mut DispatchData{update: Update{sink: &mut sink}, state: &mut state});
-                    send(&sink, &mut state, Event::NewEvents(StartCause::WaitCancelled{start: Instant::now(), requested_resume: None}));
+                    event_loop.dispatch(None, &mut erase_lifetime(DispatchData{update: Update{sink: &mut sink}, state}));
+                    send(&mut sink, &state.context, &mut state.control_flow, Event::NewEvents(StartCause::WaitCancelled{start: Instant::now(), requested_resume: None}));
                 }
                 ControlFlow::WaitUntil(deadline) => {
                     let start = Instant::now();
                     let duration = deadline.saturating_duration_since(start);
-                    event_loop.dispatch(Some(duration), &mut DispatchData{update: Update{sink: &mut sink}, state: &mut state});
+                    event_loop.dispatch(Some(duration), &mut erase_lifetime(DispatchData{update: Update{sink: &mut sink}, state}));
 
                     let now = Instant::now();
                     if now < deadline {
-                        send(&sink, &mut state, Event::NewEvents(StartCause::WaitCancelled{start, requested_resume: Some(deadline)}));
+                        send(&mut sink, &state.context, &mut state.control_flow, Event::NewEvents(StartCause::WaitCancelled{start, requested_resume: Some(deadline)}));
                     } else {
-                        send(&sink, &mut state, Event::NewEvents(StartCause::ResumeTimeReached{start, requested_resume: deadline}));
+                        send(&mut sink, &state.context, &mut state.control_flow, Event::NewEvents(StartCause::ResumeTimeReached{start, requested_resume: deadline}));
                     }
                 }
             }
-            send(&sink, &mut state, Event::MainEventsCleared);
+            send(&mut sink, &state.context, &mut state.control_flow, Event::MainEventsCleared);
             // sink.send_all(state.redraw_events.drain(..));
-            for event in state.redraw_events.drain(..) { send(&sink, &mut state, event); }
-            send(&sink, &mut state, Event::RedrawEventsCleared);
+            for event in state.redraw_events.drain(..) { send(&mut sink, &state.context, &mut state.control_flow, event); }
+            send(&mut sink, &state.context, &mut state.control_flow, Event::RedrawEventsCleared);
         }
-        send(&sink, &mut state, Event::LoopDestroyed);
+        drop(seat_handler);
+        send(&mut sink, &state.context, &mut state.control_flow, Event::LoopDestroyed);
     }
 
     pub fn primary_monitor(&self) -> MonitorHandle {
-        primary_monitor(&self.env.lock().unwrap())
+        primary_monitor(&self.state.context.env)
     }
 
     pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
-        available_monitors(&self.env.lock().unwrap())
+        available_monitors(&self.state.context.env)
     }
 }
 

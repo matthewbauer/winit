@@ -86,15 +86,14 @@ pub enum OsError {
 }
 
 impl fmt::Display for OsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        #[cfg(feature = "x11")]
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self {
-            OsError::XError(e) => f.pad(&e.description),
-            OsError::XMisc(e) => f.pad(e),
+            #[cfg(feature = "x11")]
+            OsError::XError(e) => _f.pad(&e.description),
+            #[cfg(feature = "x11")]
+            OsError::XMisc(e) => _f.pad(e),
+            _ => Ok(())
         }
-        #[cfg(not(feature = "x11"))]
-        let _ = f;
-        unreachable!();
     }
 }
 
@@ -594,7 +593,7 @@ impl<T: 'static> Clone for EventLoopProxy<T> {
         match self {
             #[cfg(feature = "x11")]
             EventLoopProxy::X(proxy) => EventLoopProxy::X(proxy.clone()),
-            EventLoopProxy::Wayland(proxy) => EventLoopProxy::Wayland(*proxy.clone()),
+            EventLoopProxy::Wayland(proxy) => EventLoopProxy::Wayland(proxy.clone()),
         }
     }
 }

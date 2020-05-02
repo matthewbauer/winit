@@ -132,7 +132,7 @@
 //#![deny(rust_2018_idioms)]
 #![deny(intra_doc_link_resolution_failure)]
 
-#![cfg_attr(target_os="linux",feature(trait_alias))]
+#![cfg_attr(target_os="linux",feature(trait_alias,vec_remove_item,bindings_after_at))]
 
 #[allow(unused_imports)]
 #[macro_use]

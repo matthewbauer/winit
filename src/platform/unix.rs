@@ -17,9 +17,11 @@ use crate::{
 #[cfg(feature = "x11")]
 use crate::platform_impl::x11::{ffi::XVisualInfo, XConnection};
 use crate::platform_impl::{
-    EventLoop as LinuxEventLoop, EventLoopWindowTarget as LinuxEventLoopWindowTarget,
+    EventLoop as LinuxEventLoop,
     Window as LinuxWindow,
 };
+#[cfg(any(feature = "x11", feature= "wayland-client/use_system_lib"))]
+use crate::platform_impl::EventLoopWindowTarget as LinuxEventLoopWindowTarget;
 
 // TODO: stupid hack so that glutin can do its work
 #[doc(hidden)]
@@ -47,6 +49,7 @@ pub trait EventLoopWindowTargetExtUnix {
     /// Returns `None` if the `EventLoop` doesn't use wayland (if it uses xlib for example).
     ///
     /// The pointer will become invalid when the winit `EventLoop` is destroyed.
+    #[cfg(feature = "wayland-client/use_system_lib")]
     fn wayland_display(&self) -> Option<*mut raw::c_void>;
 }
 
@@ -71,11 +74,12 @@ impl<T> EventLoopWindowTargetExtUnix for EventLoopWindowTarget<T> {
         }
     }
 
+    #[cfg(feature = "wayland-client/use_system_lib")]
     #[inline]
     fn wayland_display(&self) -> Option<*mut raw::c_void> {
         match self.p {
             LinuxEventLoopWindowTarget::Wayland(ref p) => {
-                Some(p.display().get_display_ptr() as *mut _)
+                Some(p.display.get_display_ptr() as *mut _)
             }
             #[allow(unreachable_patterns)]
             _ => None,
@@ -223,6 +227,7 @@ pub trait WindowExtUnix {
     /// Returns `None` if the window doesn't use wayland (if it uses xlib for example).
     ///
     /// The pointer will become invalid when the glutin `Window` is destroyed.
+    #[cfg(feature = "wayland-client/use_system_lib")]
     fn wayland_display(&self) -> Option<*mut raw::c_void>;
 
     /// Sets the color theme of the client side window decorations on wayland
@@ -308,10 +313,11 @@ impl WindowExtUnix for Window {
         }
     }
 
+    #[cfg(feature = "wayland-client/use_system_lib")]
     #[inline]
     fn wayland_display(&self) -> Option<*mut raw::c_void> {
         match self.window {
-            LinuxWindow::Wayland(ref w) => Some(w.display().c_ptr() as *mut _),
+            LinuxWindow::Wayland(ref w) => Some(w.display.get_display_ptr() as *mut _),
             #[allow(unreachable_patterns)]
             _ => None,
         }

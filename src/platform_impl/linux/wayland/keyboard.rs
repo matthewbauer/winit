@@ -1,33 +1,40 @@
-use std::{rc::Rc, cell::Cell};
-pub use smithay_client_toolkit::seat::keyboard::{Event, KeyState};
-use {super::Update, crate::{event::{ModifiersState, KeyboardInput}}, super::conversion};
+//use std::{rc::Rc, cell::Cell};
+pub use smithay_client_toolkit::{reexports::client::protocol::wl_surface::WlSurface, seat::keyboard::{self, KeyState}};
+use {crate::event::{ElementState, ModifiersState}, super::conversion};
 
 // Track modifiers and key repetition
 #[derive(Default)] pub struct Keyboard {
+    focus : Option<WlSurface>,
     modifiers : ModifiersState,
-    repeat : Option<Rc<Cell<Event<'static>>>>,
+    // Would be async repeat but using calloop sctk map_keyboard_repeat for now
+    // repeat : Option<Rc<Cell<crate::event::WindowEvent<'static>>>>,
 }
 
 impl Keyboard {
-    pub fn handle<T>(&mut self, Update{sink, ..}: &mut Update<T>, event: Event, is_synthetic: bool) {
-        let Self{modifiers, repeat} = self;
-        let event = |e,s| sink(event(e), s);
+    pub fn handle(&mut self, mut send: impl FnMut(crate::event::WindowEvent, &WlSurface), event: keyboard::Event, is_synthetic: bool) {
+        let Self{focus, modifiers/*, repeat*/} = self;
+        let device_id = crate::event::DeviceId(super::super::DeviceId::Wayland(super::DeviceId));
+        use {keyboard::Event::*, crate::event::WindowEvent::*};
         match event {
-            Event::Enter { surface, .. } => {
-                event(Event::Focused(true), surface);
+            Enter { surface, .. } => {
+                send(Focused(true), &surface);
                 /*if !modifiers.is_empty() ?*/ {
-                    event(Event::ModifiersChanged(modifiers), surface);
+                    send(ModifiersChanged(*modifiers), &surface);
                 }
+                *focus = Some(surface);
             }
-            Event::Leave { surface, .. } => {
-                //*repeat = None, // will drop the timer on its next event (Weak::upgrade=None)
+            Leave { surface, .. } => {
+                // Would be async repeat but using calloop sctk map_keyboard_repeat for now
+                //*repeat = None; // will drop the timer on its next event (Weak::upgrade=None)
                 /*if !modifiers.is_empty() {
-                    sink.send_window_event(WindowEvent::ModifiersChanged(ModifiersState::empty()), wid);
+                    send(ModifiersChanged(ModifiersState::empty()), surface);
                 }*/
-                event(Event::Focused(false), surface);
+                send(Focused(false), &surface);
+                *focus = None;
             }
-            key @ Event::Key{ surface, rawkey, state, utf8, .. } => {
-                /*if state == KeyState::Pressed {
+            ref key @ Key{ rawkey, state, ref utf8, .. } => if let Some(focus) = focus /*=>*/ {
+                /*//Would be async repeat but using sctk calloop repeat for now
+                if state == KeyState::Pressed {
                     if let Some(repeat) = repeat { // Update existing repeat cell (also triggered by the actual repetition => noop)
                         repeat.set(event);
                         // Note: This keeps the same timer on key repeat change. No delay! Nice!
@@ -50,30 +57,31 @@ impl Keyboard {
                 } else {
                     if repeat.filter(|r| r.get()==event).is_some() { repeat = None }
                 }*/
-                event(
+                send(
                     #[allow(deprecated)]
-                    Event::KeyboardInput {
-                        device_id: crate::platform_impl::DeviceId::Wayland(super::DeviceId),
-                        input: KeyboardInput {
-                            state,
+                    KeyboardInput {
+                        device_id,
+                        input: crate::event::KeyboardInput {
+                            state: if state == KeyState::Pressed { ElementState::Pressed } else { ElementState::Released },
                             scancode: rawkey,
                             virtual_keycode: conversion::key(key),
-                            modifiers,
+                            modifiers: *modifiers,
                         },
                         is_synthetic,
                     },
-                    surface.id(),
+                    focus,
                 );
                 if let Some(txt) = utf8 {
                     for char in txt.chars() {
-                        event(Event::ReceivedCharacter(char), surface);
+                        send(ReceivedCharacter(char), focus);
                     }
                 }
             }
-            Event::Modifiers { surface, modifiers: new_modifiers, .. } => {
+            Modifiers { modifiers: new_modifiers, .. } => if let Some(focus) = focus /*=>*/ {
                 *modifiers = conversion::modifiers(new_modifiers);
-                event(Event::ModifiersChanged(modifiers), surface);
+                send(ModifiersChanged(*modifiers), focus);
             }
+            Repeat {..} => {}, // fixme
         }
     }
 }
