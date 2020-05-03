@@ -87,13 +87,16 @@ pub enum OsError {
 
 impl fmt::Display for OsError {
     fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        match self {
+        #[cfg(feature = "x11")]
+        match *self {
             #[cfg(feature = "x11")]
             OsError::XError(e) => _f.pad(&e.description),
             #[cfg(feature = "x11")]
             OsError::XMisc(e) => _f.pad(e),
             _ => Ok(())
         }
+        #[cfg(not(feature = "x11"))]
+        Ok(())
     }
 }
 
@@ -139,46 +142,46 @@ pub enum MonitorHandle {
 impl MonitorHandle {
     #[inline]
     pub fn name(&self) -> Option<String> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &MonitorHandle::X(ref m) => m.name(),
-            &MonitorHandle::Wayland(ref m) => m.name(),
+            MonitorHandle::X(ref m) => m.name(),
+            MonitorHandle::Wayland(ref m) => m.name(),
         }
     }
 
     #[inline]
     pub fn native_identifier(&self) -> u32 {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &MonitorHandle::X(ref m) => m.native_identifier(),
-            &MonitorHandle::Wayland(ref m) => m.native_identifier(),
+            MonitorHandle::X(ref m) => m.native_identifier(),
+            MonitorHandle::Wayland(ref m) => m.native_identifier(),
         }
     }
 
     #[inline]
     pub fn size(&self) -> PhysicalSize<u32> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &MonitorHandle::X(ref m) => m.size(),
-            &MonitorHandle::Wayland(ref m) => m.size(),
+            MonitorHandle::X(ref m) => m.size(),
+            MonitorHandle::Wayland(ref m) => m.size(),
         }
     }
 
     #[inline]
     pub fn position(&self) -> PhysicalPosition<i32> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &MonitorHandle::X(ref m) => m.position(),
-            &MonitorHandle::Wayland(ref m) => m.position(),
+            MonitorHandle::X(ref m) => m.position(),
+            MonitorHandle::Wayland(ref m) => m.position(),
         }
     }
 
     #[inline]
     pub fn scale_factor(&self) -> f64 {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &MonitorHandle::X(ref m) => m.scale_factor(),
-            &MonitorHandle::Wayland(ref m) => m.scale_factor() as f64,
+            MonitorHandle::X(ref m) => m.scale_factor(),
+            MonitorHandle::Wayland(ref m) => m.scale_factor() as f64,
         }
     }
 
@@ -202,37 +205,37 @@ pub enum VideoMode {
 impl VideoMode {
     #[inline]
     pub fn size(&self) -> PhysicalSize<u32> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &VideoMode::X(ref m) => m.size(),
-            &VideoMode::Wayland(ref m) => m.size(),
+            VideoMode::X(ref m) => m.size(),
+            VideoMode::Wayland(ref m) => m.size(),
         }
     }
 
     #[inline]
     pub fn bit_depth(&self) -> u16 {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &VideoMode::X(ref m) => m.bit_depth(),
-            &VideoMode::Wayland(ref m) => m.bit_depth(),
+            VideoMode::X(ref m) => m.bit_depth(),
+            VideoMode::Wayland(ref m) => m.bit_depth(),
         }
     }
 
     #[inline]
     pub fn refresh_rate(&self) -> u16 {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &VideoMode::X(ref m) => m.refresh_rate(),
-            &VideoMode::Wayland(ref m) => m.refresh_rate(),
+            VideoMode::X(ref m) => m.refresh_rate(),
+            VideoMode::Wayland(ref m) => m.refresh_rate(),
         }
     }
 
     #[inline]
     pub fn monitor(&self) -> RootMonitorHandle {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &VideoMode::X(ref m) => m.monitor(),
-            &VideoMode::Wayland(ref m) => m.monitor(),
+            VideoMode::X(ref m) => m.monitor(),
+            VideoMode::Wayland(ref m) => m.monitor(),
         }
     }
 }
@@ -257,208 +260,208 @@ impl Window {
 
     #[inline]
     pub fn id(&self) -> WindowId {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => WindowId::X(w.id()),
-            &Window::Wayland(ref w) => WindowId::Wayland(w.id()),
+            Window::X(ref w) => WindowId::X(w.id()),
+            Window::Wayland(ref w) => WindowId::Wayland(w.id()),
         }
     }
 
     #[inline]
     pub fn set_title(&self, title: &str) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_title(title),
-            &Window::Wayland(ref w) => w.set_title(title),
+            Window::X(ref w) => w.set_title(title),
+            Window::Wayland(ref w) => w.set_title(title),
         }
     }
 
     #[inline]
     pub fn set_visible(&self, visible: bool) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_visible(visible),
-            &Window::Wayland(ref w) => w.set_visible(visible),
+            Window::X(ref w) => w.set_visible(visible),
+            Window::Wayland(ref w) => w.set_visible(visible),
         }
     }
 
     #[inline]
     pub fn outer_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.outer_position(),
-            &Window::Wayland(ref w) => w.outer_position(),
+            Window::X(ref w) => w.outer_position(),
+            Window::Wayland(ref w) => w.outer_position(),
         }
     }
 
     #[inline]
     pub fn inner_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref m) => m.inner_position(),
-            &Window::Wayland(ref m) => m.inner_position(),
+            Window::X(ref m) => m.inner_position(),
+            Window::Wayland(ref m) => m.inner_position(),
         }
     }
 
     #[inline]
     pub fn set_outer_position(&self, position: Position) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_outer_position(position),
-            &Window::Wayland(ref w) => w.set_outer_position(position),
+            Window::X(ref w) => w.set_outer_position(position),
+            Window::Wayland(ref w) => w.set_outer_position(position),
         }
     }
 
     #[inline]
     pub fn inner_size(&self) -> PhysicalSize<u32> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.inner_size(),
-            &Window::Wayland(ref w) => w.inner_size(),
+            Window::X(ref w) => w.inner_size(),
+            Window::Wayland(ref w) => w.inner_size(),
         }
     }
 
     #[inline]
     pub fn outer_size(&self) -> PhysicalSize<u32> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.outer_size(),
-            &Window::Wayland(ref w) => w.outer_size(),
+            Window::X(ref w) => w.outer_size(),
+            Window::Wayland(ref w) => w.outer_size(),
         }
     }
 
     #[inline]
     pub fn set_inner_size(&self, size: Size) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_inner_size(size),
-            &Window::Wayland(ref w) => w.set_inner_size(size),
+            Window::X(ref w) => w.set_inner_size(size),
+            Window::Wayland(ref w) => w.set_inner_size(size),
         }
     }
 
     #[inline]
     pub fn set_min_inner_size(&self, dimensions: Option<Size>) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_min_inner_size(dimensions),
-            &Window::Wayland(ref w) => w.set_min_inner_size(dimensions),
+            Window::X(ref w) => w.set_min_inner_size(dimensions),
+            Window::Wayland(ref w) => w.set_min_inner_size(dimensions),
         }
     }
 
     #[inline]
     pub fn set_max_inner_size(&self, dimensions: Option<Size>) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_max_inner_size(dimensions),
-            &Window::Wayland(ref w) => w.set_max_inner_size(dimensions),
+            Window::X(ref w) => w.set_max_inner_size(dimensions),
+            Window::Wayland(ref w) => w.set_max_inner_size(dimensions),
         }
     }
 
     #[inline]
     pub fn set_resizable(&self, resizable: bool) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_resizable(resizable),
-            &Window::Wayland(ref w) => w.set_resizable(resizable),
+            Window::X(ref w) => w.set_resizable(resizable),
+            Window::Wayland(ref w) => w.set_resizable(resizable),
         }
     }
 
     #[inline]
     pub fn set_cursor_icon(&self, cursor: CursorIcon) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_cursor_icon(cursor),
-            &Window::Wayland(ref w) => w.set_cursor_icon(cursor),
+            Window::X(ref w) => w.set_cursor_icon(cursor),
+            Window::Wayland(ref w) => w.set_cursor_icon(cursor),
         }
     }
 
     #[inline]
     pub fn set_cursor_grab(&self, grab: bool) -> Result<(), ExternalError> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref window) => window.set_cursor_grab(grab),
-            &Window::Wayland(ref window) => window.set_cursor_grab(grab),
+            Window::X(ref window) => window.set_cursor_grab(grab),
+            Window::Wayland(ref window) => window.set_cursor_grab(grab),
         }
     }
 
     #[inline]
     pub fn set_cursor_visible(&self, visible: bool) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref window) => window.set_cursor_visible(visible),
-            &Window::Wayland(ref window) => window.set_cursor_visible(visible),
+            Window::X(ref window) => window.set_cursor_visible(visible),
+            Window::Wayland(ref window) => window.set_cursor_visible(visible),
         }
     }
 
     #[inline]
     pub fn scale_factor(&self) -> f64 {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.scale_factor(),
-            &Window::Wayland(ref w) => w.scale_factor() as f64,
+            Window::X(ref w) => w.scale_factor(),
+            Window::Wayland(ref w) => w.scale_factor() as f64,
         }
     }
 
     #[inline]
     pub fn set_cursor_position(&self, position: Position) -> Result<(), ExternalError> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_cursor_position(position),
-            &Window::Wayland(ref w) => w.set_cursor_position(position),
+            Window::X(ref w) => w.set_cursor_position(position),
+            Window::Wayland(ref w) => w.set_cursor_position(position),
         }
     }
 
     #[inline]
     pub fn set_maximized(&self, maximized: bool) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_maximized(maximized),
-            &Window::Wayland(ref w) => w.set_maximized(maximized),
+            Window::X(ref w) => w.set_maximized(maximized),
+            Window::Wayland(ref w) => w.set_maximized(maximized),
         }
     }
 
     #[inline]
     pub fn set_minimized(&self, minimized: bool) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_minimized(minimized),
-            &Window::Wayland(ref w) => w.set_minimized(minimized),
+            Window::X(ref w) => w.set_minimized(minimized),
+            Window::Wayland(ref w) => w.set_minimized(minimized),
         }
     }
 
     #[inline]
     pub fn fullscreen(&self) -> Option<Fullscreen> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.fullscreen(),
-            &Window::Wayland(ref w) => w.fullscreen(),
+            Window::X(ref w) => w.fullscreen(),
+            Window::Wayland(ref w) => w.fullscreen(),
         }
     }
 
     #[inline]
     pub fn set_fullscreen(&self, monitor: Option<Fullscreen>) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_fullscreen(monitor),
-            &Window::Wayland(ref w) => w.set_fullscreen(monitor),
+            Window::X(ref w) => w.set_fullscreen(monitor),
+            Window::Wayland(ref w) => w.set_fullscreen(monitor),
         }
     }
 
     #[inline]
     pub fn set_decorations(&self, decorations: bool) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_decorations(decorations),
-            &Window::Wayland(ref w) => w.set_decorations(decorations),
+            Window::X(ref w) => w.set_decorations(decorations),
+            Window::Wayland(ref w) => w.set_decorations(decorations),
         }
     }
 
     #[inline]
     pub fn set_always_on_top(&self, always_on_top: bool) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_always_on_top(always_on_top),
-            &Window::Wayland(_) => {
+            Window::X(ref w) => w.set_always_on_top(always_on_top),
+            Window::Wayland(_) => {
                 let _ = always_on_top;
             }
         }
@@ -466,10 +469,10 @@ impl Window {
 
     #[inline]
     pub fn set_window_icon(&self, window_icon: Option<Icon>) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_window_icon(window_icon),
-            &Window::Wayland(_) => {
+            Window::X(ref w) => w.set_window_icon(window_icon),
+            Window::Wayland(_) => {
                 let _ = window_icon;
             }
         }
@@ -477,10 +480,10 @@ impl Window {
 
     #[inline]
     pub fn set_ime_position(&self, position: Position) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.set_ime_position(position),
-            &Window::Wayland(_) => {
+            Window::X(ref w) => w.set_ime_position(position),
+            Window::Wayland(_) => {
                 let _ = position;
             }
         }
@@ -488,21 +491,21 @@ impl Window {
 
     #[inline]
     pub fn request_redraw(&self) {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref w) => w.request_redraw(),
-            &Window::Wayland(ref w) => w.request_redraw(),
+            Window::X(ref w) => w.request_redraw(),
+            Window::Wayland(ref w) => w.request_redraw(),
         }
     }
 
     #[inline]
     pub fn current_monitor(&self) -> RootMonitorHandle {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref window) => RootMonitorHandle {
+            Window::X(ref window) => RootMonitorHandle {
                 inner: MonitorHandle::X(window.current_monitor()),
             },
-            &Window::Wayland(ref window) => RootMonitorHandle {
+            Window::Wayland(ref window) => RootMonitorHandle {
                 inner: MonitorHandle::Wayland(window.current_monitor()),
             },
         }
@@ -510,14 +513,14 @@ impl Window {
 
     #[inline]
     pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref window) => window
+            Window::X(ref window) => window
                 .available_monitors()
                 .into_iter()
                 .map(MonitorHandle::X)
                 .collect(),
-            &Window::Wayland(ref window) => window
+            Window::Wayland(ref window) => window
                 .available_monitors()
                 .into_iter()
                 .map(MonitorHandle::Wayland)
@@ -527,18 +530,18 @@ impl Window {
 
     #[inline]
     pub fn primary_monitor(&self) -> MonitorHandle {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref window) => MonitorHandle::X(window.primary_monitor()),
-            &Window::Wayland(ref window) => MonitorHandle::Wayland(window.primary_monitor()),
+            Window::X(ref window) => MonitorHandle::X(window.primary_monitor()),
+            Window::Wayland(ref window) => MonitorHandle::Wayland(window.primary_monitor()),
         }
     }
 
     pub fn raw_window_handle(&self) -> RawWindowHandle {
-        match self {
+        match *self {
             #[cfg(feature = "x11")]
-            &Window::X(ref window) => RawWindowHandle::Xlib(window.raw_window_handle()),
-            &Window::Wayland(ref window) => RawWindowHandle::Wayland(window.raw_window_handle()),
+            Window::X(ref window) => RawWindowHandle::Xlib(window.raw_window_handle()),
+            Window::Wayland(ref window) => RawWindowHandle::Wayland(window.raw_window_handle()),
         }
     }
 }

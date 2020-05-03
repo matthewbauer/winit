@@ -137,6 +137,7 @@ impl<'a, T> Event<'a, T> {
 
     /// If the event doesn't contain a reference, turn it into an event with a `'static` lifetime.
     /// Otherwise, return `None`.
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_static(self) -> Option<Event<'static, T>> {
         use self::Event::*;
         match self {
@@ -331,6 +332,7 @@ pub enum WindowEvent<'a> {
 }
 
 impl<'a> WindowEvent<'a> {
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_static(self) -> Option<WindowEvent<'static>> {
         use self::WindowEvent::*;
         match self {
@@ -426,7 +428,7 @@ impl DeviceId {
     /// Returns a dummy `DeviceId`, useful for unit testing. The only guarantee made about the return
     /// value of this function is that it will always be equal to itself and to future values returned
     /// by this function.  No other guarantees are made. This may be equal to a real `DeviceId`.
-    ///
+    /// # Safety
     /// **Passing this into a winit function will result in undefined behavior.**
     pub unsafe fn dummy() -> Self {
         DeviceId(platform_impl::DeviceId::dummy())
@@ -879,7 +881,7 @@ bitflags! {
         // left and right modifiers are currently commented out, but we should be able to support
         // them in a future release
         /// The "shift" key.
-        const SHIFT = 0b100 << 0;
+        const SHIFT = 0b100;
         // const LSHIFT = 0b010 << 0;
         // const RSHIFT = 0b001 << 0;
         /// The "control" key.

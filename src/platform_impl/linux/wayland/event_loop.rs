@@ -76,7 +76,8 @@ pub type EventLoopWindowTarget<T> = &'static Context<T>; // Erase lifetime to 's
 pub fn window_target<T>(event_loop_window_target: &Context<T>) -> crate::event_loop::EventLoopWindowTarget<T> {
     crate::event_loop::EventLoopWindowTarget{
         p: crate::platform_impl::EventLoopWindowTarget::Wayland(
-            unsafe{std::mem::transmute::<&Context<T>, &'static Context<T>>(&event_loop_window_target)}
+            //unsafe{std::mem::transmute::<&Context<T>, &'static Context<T>>(&event_loop_window_target)}
+            unsafe{&*(&event_loop_window_target as *const &Context<T> as *const Context<T>)}
             /*'EventLoopWindowTarget:'EventLoop*/
         ),
         _marker: Default::default()
@@ -261,7 +262,7 @@ impl<T> EventLoop<T> {
     pub fn run_return<S:Sink<T>>(&mut self, mut sink: S) {
         let Self{event_loop, state, ..} = self;
 
-        let seat_handler = { // for a simple setup
+        let _seat_handler = { // for a simple setup
             let (loop_handle, env) = (event_loop.handle(), &state.context.env);
 
             use smithay_client_toolkit::seat::{
@@ -356,7 +357,7 @@ impl<T> EventLoop<T> {
             for event in state.redraw_events.drain(..) { send(&mut sink, &state.context, &mut state.control_flow, event); }
             send(&mut sink, &state.context, &mut state.control_flow, Event::RedrawEventsCleared);
         }
-        drop(seat_handler);
+        //drop(seat_handler);
         send(&mut sink, &state.context, &mut state.control_flow, Event::LoopDestroyed);
     }
 
@@ -496,7 +497,7 @@ impl MonitorHandle {
         let monitor = self.clone();
 
         with_output_info(&self.0, |info| info.modes.clone())
-            .unwrap_or(vec![])
+            .unwrap_or_default()
             .into_iter()
             .map(move |x| crate::monitor::VideoMode {
                 video_mode: platform::VideoMode::Wayland(VideoMode {
