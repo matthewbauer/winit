@@ -288,7 +288,6 @@ impl WindowExtUnix for Window {
     #[cfg(feature = "x11")]
     #[inline]
     fn set_urgent(&self, is_urgent: bool) {
-        #[cfg(feature = "x11")]
         if let LinuxWindow::X(ref w) = self.window {
             w.set_urgent(is_urgent);
         }
@@ -298,7 +297,6 @@ impl WindowExtUnix for Window {
     #[inline]
     fn xcb_connection(&self) -> Option<*mut raw::c_void> {
         match self.window {
-            #[cfg(feature = "x11")]
             LinuxWindow::X(ref w) => Some(w.xcb_connection()),
             _ => None,
         }
